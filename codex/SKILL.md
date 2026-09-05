@@ -612,10 +612,11 @@ above); never read the other two mode sections.
 **Reasoning effort override:** If the user's input contains `--xhigh` anywhere,
 note it and remove it from the prompt text before passing to Codex. When `--xhigh`
 is present, use `model_reasoning_effort="xhigh"` for all modes regardless of the
-per-mode default below. Otherwise, use the per-mode defaults:
-- Review (2A): `high` — bounded diff input, needs thoroughness
-- Challenge (2B): `high` — adversarial but bounded by diff
-- Consult (2C): `medium` — large context, interactive, needs speed
+per-mode default below. All three per-mode defaults are `xhigh` as of 2026-09-05, so
+`--xhigh` is now a no-op kept so existing muscle memory does not error:
+- Review (2A): `xhigh`
+- Challenge (2B): `xhigh`
+- Consult (2C): `xhigh`
 
 ---
 
@@ -795,19 +796,21 @@ must be the file's terminal heading.
 
 ## Model & Reasoning
 
-**Model:** No model is hardcoded — codex uses whatever its current default is (the frontier
-agentic coding model). This means as OpenAI ships newer models, /codex automatically
-uses them. If the user wants a specific model, pass it through — but the flag differs
-by mode (see below).
+**Model:** No model is hardcoded. Codex uses whatever the `model = ` line in
+`~/.codex/config.toml` names, falling back to the CLI's own default when that line is
+absent. As of 2026-09-05 that pin is `gpt-6-astra` (GPT-6 Astra, needs codex CLI >=
+0.153.0), so every mode already runs Astra without this skill naming it. Move to a newer
+model by editing that one config line, not by hardcoding a model here. For a single run
+the user can still pass a model through — the flag differs by mode (see below).
 
-**Reasoning effort (per-mode defaults):**
-- **Review (2A):** `high` — bounded diff input, needs thoroughness but not max tokens
-- **Challenge (2B):** `high` — adversarial but bounded by diff size
-- **Consult (2C):** `medium` — large context (plans, codebase), interactive, needs speed
+**Reasoning effort: `xhigh` for all three modes** (set 2026-09-05 at owner request;
+previously Review/Challenge `high`, Consult `medium`).
 
 `xhigh` uses ~23x more tokens than `high` and causes 50+ minute hangs on large context
-tasks (OpenAI issues #8545, #8402, #6931). Users can override with `--xhigh` flag
-(e.g., `/codex review --xhigh`) when they want maximum reasoning and are willing to wait.
+tasks (OpenAI issues #8545, #8402, #6931). The wrapper budgets were raised to match:
+Review 600s, Challenge/Consult 900s. Valid effort values, verified against the API on
+2026-09-05: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. There is no
+`ultra`, despite the model picker's labels.
 
 **Web search:** All codex commands pass `-c 'web_search="cached"'` so `codex exec`
 invocations can look up docs and APIs during review. This is OpenAI's cached index —
@@ -817,8 +820,8 @@ codex >=0.144), the `-c` form explicitly overrides any top-level
 web search regardless of configuration, so on the default Review path the flag is a
 harmless no-op — only exec-based modes actually search.
 
-If the user specifies a model (e.g., `/codex review -m gpt-5.1-codex-max` or
-`/codex challenge -m gpt-5.2`), the flag to pass depends on the underlying command:
+If the user specifies a model (e.g., `/codex review -m gpt-6-astra` or
+`/codex challenge -m gpt-5.6-sol`), the flag to pass depends on the underlying command:
 
 - **Exec-based modes** (Challenge, Consult, and the custom-instructions Review path)
   run `codex exec`, which takes `-m <model>` — pass it through as-is.
@@ -845,12 +848,12 @@ If token count is not available, display: `Tokens: unknown`
 - **Binary not found:** Detected in Step 0. Stop with install instructions.
 - **Auth error:** Codex prints an auth error to stderr. Surface the error:
   "Codex authentication failed. Run `codex login` in your terminal to authenticate via ChatGPT."
-- **Timeout (Bash outer gate):** Every Bash gate sits ABOVE its inner wrapper (360s gate
-  over the 330s review wrapper; 660s gate over the 600s challenge/consult wrappers), so
+- **Timeout (Bash outer gate):** Every Bash gate sits ABOVE its inner wrapper (660s gate
+  over the 600s review wrapper; 960s gate over the 900s challenge/consult wrappers), so
   the wrapper's exit-124 path normally fires first with its explicit message. If the Bash
   call itself times out anyway (wrapper unavailable AND codex hung), tell the user:
   "Codex timed out. The prompt may be too large or the API may be slow. Try again or use a smaller scope."
-- **Timeout (inner `timeout` wrapper, exit 124):** If the shell `timeout 600` wrapper fires first, the skill's hang-detection block auto-logs a telemetry event + operational learning and prints: "Codex stalled past 10 minutes. Common causes: model API stall, long prompt, network issue. Try re-running. If persistent, split the prompt or check `~/.codex/logs/`." No extra action needed.
+- **Timeout (inner `timeout` wrapper, exit 124):** If the shell `timeout 900` wrapper fires first, the skill's hang-detection block auto-logs a telemetry event + operational learning and prints: "Codex stalled past 15 minutes. Common causes: model API stall, long prompt, network issue. Try re-running. If persistent, split the prompt or check `~/.codex/logs/`." No extra action needed.
 - **`the argument '[PROMPT]' cannot be used with '--base <BRANCH>'`:** a prompt argument
   leaked into a scoped `codex review`. This fails instantly, before any API call, so it
   looks like a hang-free "no output" — do not misread it as a model stall. Drop the
@@ -892,8 +895,8 @@ If token count is not available, display: `Tokens: unknown`
 - **Add synthesis after, not instead of.** Any Claude commentary comes after the full output.
 - **Bash gate above the wrapper.** Every Bash call to codex sets its `timeout`
   parameter ABOVE the inner `_gstack_codex_timeout_wrapper` budget (Review:
-  `timeout: 360000` over the 330s wrapper; Challenge/Consult: `timeout: 660000`
-  over the 600s wrappers) so the wrapper fires first with a diagnosable exit 124.
+  `timeout: 660000` over the 600s wrapper; Challenge/Consult: `timeout: 960000`
+  over the 900s wrappers) so the wrapper fires first with a diagnosable exit 124.
 - **No double-reviewing.** If the user already ran `/review`, Codex provides a second
   independent opinion. Do not re-run Claude Code's own review.
 - **Detect skill-file rabbit holes.** After receiving Codex output, scan for signs
