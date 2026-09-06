@@ -1751,10 +1751,16 @@ describe('DESIGN_OUTSIDE_VOICES resolver', () => {
   test('branches correctly per skillName — different prompts', () => {
     const planContent = readSkillUnion('plan-design-review');
     const consultContent = fs.readFileSync(path.join(ROOT, 'design-consultation', 'SKILL.md'), 'utf-8');
-    // plan-design-review uses analytical prompt (high reasoning)
-    expect(planContent).toContain('model_reasoning_effort="high"');
-    // design-consultation uses creative prompt (medium reasoning)
-    expect(consultContent).toContain('model_reasoning_effort="medium"');
+    // 2026-09-06: reasoning effort is xhigh everywhere, so the effort knob no
+    // longer distinguishes these branches. Assert on the prompt BODIES instead —
+    // mutually exclusive, and a stronger signal than a shared tuning parameter.
+    expect(planContent).toContain('HARD REJECTION');
+    expect(planContent).not.toContain('creative alternatives');
+    expect(consultContent).toContain('creative alternatives');
+    expect(consultContent).not.toContain('HARD REJECTION');
+    // Both branches still emit an effort knob, now unified.
+    expect(planContent).toContain('model_reasoning_effort="xhigh"');
+    expect(consultContent).toContain('model_reasoning_effort="xhigh"');
   });
 });
 

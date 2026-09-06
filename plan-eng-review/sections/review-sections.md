@@ -408,10 +408,10 @@ THE PLAN:
 ```bash
 TMPERR_PV=$(mktemp /tmp/codex-planreview-XXXXXXXX)
 _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
-codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' -c 'web_search="cached"' < /dev/null 2>"$TMPERR_PV"
+codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="xhigh"' -c 'web_search="cached"' < /dev/null 2>"$TMPERR_PV"
 ```
 
-Use a 5-minute timeout (`timeout: 300000`). After the command completes, read stderr:
+Use a 9-minute timeout (`timeout: 540000`). After the command completes, read stderr:
 ```bash
 cat "$TMPERR_PV"
 ```
