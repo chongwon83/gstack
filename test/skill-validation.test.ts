@@ -1550,7 +1550,10 @@ describe('Codex skill', () => {
     expect(content).toContain('skip the Codex passes ONLY');
     // Review log
     expect(content).toContain('adversarial-review');
-    expect(content).toContain('reasoning_effort="high"');
+    // Pinned so an accidental drift of the codex tuning knob fails here. The
+    // value lives in scripts/resolvers/review.ts — update BOTH together when
+    // changing it deliberately (2026-09-06: high → xhigh).
+    expect(content).toContain('reasoning_effort="xhigh"');
     expect(content).toContain('ADVERSARIAL REVIEW SYNTHESIS');
     // Large diff structured review still gated
     expect(content).toContain('Codex structured review (large diffs only');
@@ -1561,7 +1564,10 @@ describe('Codex skill', () => {
     const content = readShipUnion();
     expect(content).toContain('Adversarial review (always-on)');
     expect(content).toContain('adversarial-review');
-    expect(content).toContain('reasoning_effort="high"');
+    // Pinned so an accidental drift of the codex tuning knob fails here. The
+    // value lives in scripts/resolvers/review.ts — update BOTH together when
+    // changing it deliberately (2026-09-06: high → xhigh).
+    expect(content).toContain('reasoning_effort="xhigh"');
     expect(content).toContain('Investigate and fix');
     expect(content).toContain('Claude adversarial subagent (always runs)');
   });
