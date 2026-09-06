@@ -71,7 +71,7 @@ in sync.
 ## Testing
 
 ```bash
-bun run test         # run before every commit — free, ~90-100s for the full ~7,000-test suite
+bun run test         # run before every commit — free, ~90-100s for the full ~8,700-test suite
 bun run test:evals   # run before shipping — paid, diff-based (~$4.35/run max)
 ```
 
@@ -253,6 +253,20 @@ This ensures Claude discovers them as top-level skills, not nested under `gstack
 Names are either short (`qa`) or namespaced (`gstack-qa`), controlled by
 `skill_prefix` in `~/.gstack/config.yaml`. Pass `--no-prefix` or `--prefix` to
 skip the interactive prompt.
+
+**Ownership gate (#2119):** `setup` writes a `.gstack-owned` marker into every
+skill directory it creates, and `setup` (the linker, the alias installer, and
+both prefix-flip cleanups) and `bin/gstack-relink` only delete or link over an
+entry they can prove is gstack's. Strong proof (a symlink resolving into gstack,
+or the marker) allows deleting or refreshing the whole directory. Weak proof (a
+real SKILL.md byte-identical to the source, or carrying gen-skill-docs' two-line
+banner) covers only that one file, and a weakly-proven file that differs is
+moved to `~/.gstack/backups/skills/<ts>/<skill>/SKILL.md` before gstack links
+over it. Anything else is a foreign skill: skipped, and named in setup's final
+summary. The rule lives in two copies (`setup` and `bin/gstack-relink`); keep
+them in sync until the shared helper filed in TODOS.md lands. Pinned by
+`test/setup-link-ownership.test.ts`, `test/setup-cleanup-orphans.test.ts`, and
+`test/relink.test.ts`.
 
 **Note:** Vendoring gstack into a project's repo is deprecated. Use global install
 + `./setup --team` instead. See README.md for team mode instructions.
