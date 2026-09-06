@@ -93,7 +93,7 @@ persisted anywhere downstream — no archive write, no transcript log, no codex
 dispatch. `spec-quality-gate-secret-sink.test.ts` enforces this.
 
 **Dispatch (when redaction passes):** Wrap the spec in hard delimiters and an
-instruction boundary, then invoke codex with a 2-minute timeout:
+instruction boundary, then invoke codex with a 9-minute timeout:
 
 ```bash
 TMPERR_GATE=$(mktemp /tmp/spec-gate-XXXXXXXX)
@@ -113,7 +113,7 @@ SPEC_BODY_EOF
 <<<END_USER_SPEC>>>" -s read-only -c 'model_reasoning_effort="xhigh"' < /dev/null 2>"$TMPERR_GATE"
 ```
 
-Use a 2-minute timeout. Read stderr from `$TMPERR_GATE` after.
+Use a 9-minute timeout (`timeout: 540000`). Read stderr from `$TMPERR_GATE` after.
 
 **Error handling:**
 - **codex not installed** (command not found): print: "Quality gate skipped —
