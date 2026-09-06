@@ -42,15 +42,15 @@ contradicting this skill's read-only contract (#2496, #2524):
 ```bash
 _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
 cd "$_REPO_ROOT"
-# The 600s wrapper sits BELOW the 660s Bash gate so the wrapper fires FIRST
+# The 540s wrapper sits BELOW the 600s Bash gate so the wrapper fires FIRST
 # and a stall surfaces as a diagnosable exit 124 with an explicit message,
 # never as a silent harness kill that downstream reads as "no findings".
-_gstack_codex_timeout_wrapper 600 codex review --base <base> -c 'sandbox_mode="read-only"' -c 'model_reasoning_effort="xhigh"' -c 'web_search="cached"' < /dev/null 2>"$TMPERR"
+_gstack_codex_timeout_wrapper 540 codex review --base <base> -c 'sandbox_mode="read-only"' -c 'model_reasoning_effort="xhigh"' -c 'web_search="cached"' < /dev/null 2>"$TMPERR"
 _CODEX_EXIT=$?
 if [ "$_CODEX_EXIT" = "124" ]; then
-  _gstack_codex_log_event "codex_timeout" "600"
+  _gstack_codex_log_event "codex_timeout" "540"
   _gstack_codex_log_hang "review" "$(wc -c < "$TMPERR" 2>/dev/null || echo 0)"
-  echo "Codex stalled past 10 minutes. Common causes: model API stall, long prompt, network issue. Try re-running. If persistent, split the prompt or check ~/.codex/logs/."
+  echo "Codex stalled past 9 minutes. Common causes: model API stall, long prompt, network issue. Try re-running. If persistent, split the prompt or check ~/.codex/logs/."
 elif [ "$_CODEX_EXIT" != "0" ]; then
   # Surface non-zero exits (parse errors, arg-shape breaks, etc.) so the
   # calling agent doesn't read "no output" as a silent model/API stall and
@@ -86,13 +86,13 @@ _PROMPT_FILE=$(mktemp "$TMP_ROOT/codex-prompt-XXXXXX")
   git diff "<base>...HEAD" 2>/dev/null
   printf '\nDIFF_END\n'
 } > "$_PROMPT_FILE"
-_gstack_codex_timeout_wrapper 600 codex exec -s read-only "$(cat "$_PROMPT_FILE")" -c 'model_reasoning_effort="xhigh"' -c 'web_search="cached"' < /dev/null 2>"$TMPERR"
+_gstack_codex_timeout_wrapper 540 codex exec -s read-only "$(cat "$_PROMPT_FILE")" -c 'model_reasoning_effort="xhigh"' -c 'web_search="cached"' < /dev/null 2>"$TMPERR"
 _CODEX_EXIT=$?
 rm -f "$_PROMPT_FILE"
 if [ "$_CODEX_EXIT" = "124" ]; then
-  _gstack_codex_log_event "codex_timeout" "600"
+  _gstack_codex_log_event "codex_timeout" "540"
   _gstack_codex_log_hang "review" "$(wc -c < "$TMPERR" 2>/dev/null || echo 0)"
-  echo "Codex stalled past 10 minutes."
+  echo "Codex stalled past 9 minutes."
 fi
 ```
 
@@ -106,8 +106,8 @@ instructions. The `codex exec` route loses that tuning but gains custom-instruct
 support; the prompt explicitly demands `[P1]` / `[P2]` markers so the gate logic in step 4
 still works. There is no third option that gets both — the CLI forbids it.
 
-Use `timeout: 660000` on the Bash call for either path. The Bash gate sits ABOVE the
-600s wrapper deliberately: the wrapper fires first with its explicit exit-124 message,
+Use `timeout: 600000` on the Bash call for either path. The Bash gate sits ABOVE the
+540s wrapper deliberately: the wrapper fires first with its explicit exit-124 message,
 instead of the harness killing the call silently.
 
 3. Capture the output. Then parse cost from stderr:

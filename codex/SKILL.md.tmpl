@@ -237,7 +237,9 @@ previously Review/Challenge `high`, Consult `medium`).
 
 `xhigh` uses ~23x more tokens than `high` and causes 50+ minute hangs on large context
 tasks (OpenAI issues #8545, #8402, #6931). The wrapper budgets were raised to match:
-Review 600s, Challenge/Consult 900s. Valid effort values, verified against the API on
+540s for all three (the 600000 ms Bash ceiling caps it; measured 2026-09-06 — a
+90-line diff takes 206s at xhigh, a 19,532-line diff takes 657s and will now fail loudly
+at 540s instead of being killed silently at 600s). Valid effort values, verified against the API on
 2026-09-05: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. There is no
 `ultra`, despite the model picker's labels.
 
@@ -277,12 +279,12 @@ If token count is not available, display: `Tokens: unknown`
 - **Binary not found:** Detected in Step 0. Stop with install instructions.
 - **Auth error:** Codex prints an auth error to stderr. Surface the error:
   "Codex authentication failed. Run `codex login` in your terminal to authenticate via ChatGPT."
-- **Timeout (Bash outer gate):** Every Bash gate sits ABOVE its inner wrapper (660s gate
-  over the 600s review wrapper; 960s gate over the 900s challenge/consult wrappers), so
+- **Timeout (Bash outer gate):** Every Bash gate sits ABOVE its inner wrapper (600s gate
+  over the 540s wrappers — see the host-cap note below), so
   the wrapper's exit-124 path normally fires first with its explicit message. If the Bash
   call itself times out anyway (wrapper unavailable AND codex hung), tell the user:
   "Codex timed out. The prompt may be too large or the API may be slow. Try again or use a smaller scope."
-- **Timeout (inner `timeout` wrapper, exit 124):** If the shell `timeout 900` wrapper fires first, the skill's hang-detection block auto-logs a telemetry event + operational learning and prints: "Codex stalled past 15 minutes. Common causes: model API stall, long prompt, network issue. Try re-running. If persistent, split the prompt or check `~/.codex/logs/`." No extra action needed.
+- **Timeout (inner `timeout` wrapper, exit 124):** If the shell `timeout 540` wrapper fires first, the skill's hang-detection block auto-logs a telemetry event + operational learning and prints: "Codex stalled past 9 minutes. Common causes: model API stall, long prompt, network issue. Try re-running. If persistent, split the prompt or check `~/.codex/logs/`." No extra action needed.
 - **`the argument '[PROMPT]' cannot be used with '--base <BRANCH>'`:** a prompt argument
   leaked into a scoped `codex review`. This fails instantly, before any API call, so it
   looks like a hang-free "no output" — do not misread it as a model stall. Drop the
@@ -324,8 +326,11 @@ If token count is not available, display: `Tokens: unknown`
 - **Add synthesis after, not instead of.** Any Claude commentary comes after the full output.
 - **Bash gate above the wrapper.** Every Bash call to codex sets its `timeout`
   parameter ABOVE the inner `_gstack_codex_timeout_wrapper` budget (Review:
-  `timeout: 660000` over the 600s wrapper; Challenge/Consult: `timeout: 960000`
-  over the 900s wrappers) so the wrapper fires first with a diagnosable exit 124.
+  `timeout: 600000` over the 540s wrapper; same for Challenge/Consult) so the wrapper
+  fires first with a diagnosable exit 124. **600000 ms is a hard ceiling** — Claude Code
+  clamps foreground Bash timeouts to it unless `BASH_MAX_TIMEOUT_MS` is raised, so a
+  wrapper at or above 600s can never fire first and the host kills the call silently
+  (downstream reads that as "no findings"). Keep every wrapper at 540s or less.
 - **No double-reviewing.** If the user already ran `/review`, Codex provides a second
   independent opinion. Do not re-run Claude Code's own review.
 - **Detect skill-file rabbit holes.** After receiving Codex output, scan for signs
