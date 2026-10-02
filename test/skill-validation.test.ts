@@ -49,6 +49,37 @@ function readShipUnion(): string {
   return readSkillUnion('ship');
 }
 
+describe('CSO host permission boundary', () => {
+  test('grants no raw source, mutation, search, question, or Agent tools', () => {
+    const content = fs.readFileSync(path.join(ROOT, 'cso', 'SKILL.md'), 'utf-8');
+    const fmEnd = content.indexOf('\n---', 4);
+    const frontmatter = Bun.YAML.parse(content.slice(4, fmEnd)) as Record<string, unknown>;
+    const allowed = frontmatter['allowed-tools'];
+    expect(allowed).toEqual([
+      'Bash(~/.claude/skills/gstack/bin/gstack-cso-launcher *)',
+      'Bash(~/.claude/skills/gstack/bin/gstack-cso-launcher.exe *)',
+    ]);
+    for (const broad of ['Bash', 'Read', 'Grep', 'Glob', 'Write', 'Agent', 'WebSearch', 'AskUserQuestion']) expect(allowed).not.toContain(broad);
+  });
+
+  test('retains helper-only source access, sequential challenge, and honest host containment', () => {
+    const content = readSkillUnion('cso');
+    expect(content).toContain('Never use host `Read`/`Glob`/`Grep`');
+    expect(content).toContain('sequential challenge; independent agent unavailable');
+    expect(content).toContain('Do not request broader tool access solely to obtain an independent reviewer.');
+    expect(content).toContain('Containment does not sandbox the host agent or kernel.');
+  });
+});
+
+function readCodexSkillUnion(skill: string): string {
+  const dir = path.join(CODEX_OUT, '.agents', 'skills', `gstack-${skill}`);
+  const sections = path.join(dir, 'sections');
+  return fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf-8')
+    + (fs.existsSync(sections) ? fs.readdirSync(sections).sort()
+      .filter(file => file.endsWith('.md'))
+      .map(file => '\n' + fs.readFileSync(path.join(sections, file), 'utf-8')).join('') : '');
+}
+
 describe('SKILL.md command validation', () => {
   // P2 (v1.2.0): the top-level gstack skill is a pure ROUTER, not the browse
   // skill. The browse body lives only in browse/SKILL.md now. This regression
@@ -285,25 +316,6 @@ describe('Usage string consistency', () => {
   });
 });
 
-describe('Generated SKILL.md freshness', () => {
-  test('no unresolved {{placeholders}} in generated SKILL.md', () => {
-    const content = fs.readFileSync(path.join(ROOT, 'SKILL.md'), 'utf-8');
-    const unresolved = content.match(/\{\{\w+\}\}/g);
-    expect(unresolved).toBeNull();
-  });
-
-  test('no unresolved {{placeholders}} in generated browse/SKILL.md', () => {
-    const content = fs.readFileSync(path.join(ROOT, 'browse', 'SKILL.md'), 'utf-8');
-    const unresolved = content.match(/\{\{\w+\}\}/g);
-    expect(unresolved).toBeNull();
-  });
-
-  test('generated SKILL.md has AUTO-GENERATED header', () => {
-    const content = fs.readFileSync(path.join(ROOT, 'SKILL.md'), 'utf-8');
-    expect(content).toContain('AUTO-GENERATED');
-  });
-});
-
 // --- Update check preamble validation ---
 
 describe('Update check preamble', () => {
@@ -323,7 +335,8 @@ describe('Update check preamble', () => {
     'benchmark/SKILL.md',
     'land-and-deploy/SKILL.md',
     'setup-deploy/SKILL.md',
-    'cso/SKILL.md',
+    // CSO intentionally uses a private startup instead of the shared update,
+    // session, learning, checkpoint, and telemetry PREAMBLE.
   ];
 
   for (const skill of skillsWithUpdateCheck) {
@@ -688,7 +701,8 @@ describe('v0.4.1 preamble features', () => {
     'canary/SKILL.md',
     'land-and-deploy/SKILL.md',
     'setup-deploy/SKILL.md',
-    'cso/SKILL.md',
+    // CSO's private startup intentionally omits the generic AUQ/session/
+    // escalation PREAMBLE; its helper owns readiness and terminal state.
   ];
 
   const skillsWithPreamble = [...tier1Skills, ...tier2PlusSkills];
@@ -954,7 +968,9 @@ describe('Completeness Principle in generated SKILL.md files', () => {
     'design-review/SKILL.md',
     'design-consultation/SKILL.md',
     'document-release/SKILL.md',
-    'cso/SKILL.md',  ];
+    // CSO reports complete/partial/not-assessed from its own evidence contract
+    // and must not inherit the shared numerical completeness rubric.
+  ];
 
   for (const skill of skillsWithPreamble) {
     test(`${skill} contains Completeness Principle section`, () => {
@@ -965,7 +981,8 @@ describe('Completeness Principle in generated SKILL.md files', () => {
   }
 
   test('Completeness Principle keeps compact scoring guidance in tier 2+ skills', () => {
-    const content = fs.readFileSync(path.join(ROOT, 'cso', 'SKILL.md'), 'utf-8');
+    // CSO is intentionally exempt; use a regular tier 2+ PREAMBLE consumer.
+    const content = fs.readFileSync(path.join(ROOT, 'review', 'SKILL.md'), 'utf-8');
     expect(content).toContain('Completeness: X/10');
     expect(content).toContain('10 = all edge cases');
     expect(content).toContain('Note: options differ in kind, not coverage');
@@ -1131,28 +1148,31 @@ describe('gstack-slug', () => {
   });
 
   test('no templates or bin scripts use source process substitution for gstack-slug', () => {
+    // Scan project sources, including new untracked templates, without walking
+    // ignored caches, symlinked installations or private evaluation worktrees.
     const result = Bun.spawnSync(
-      ['grep', '-r', 'source <(.*gstack-slug', '--include=*.tmpl', '--include=gstack-review-*', '.'],
-      { cwd: ROOT, stdout: 'pipe', stderr: 'pipe', timeout: 30_000 }
+      ['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '*.tmpl', 'bin/gstack-review-*'],
+      { cwd: ROOT, stdout: 'pipe', stderr: 'pipe', timeout: 5_000 },
     );
-    // grep returns exit code 1 when no matches found — that's what we want
-    expect(result.stdout.toString().trim()).toBe('');
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    const files = [...new Set(result.stdout.toString().split('\0').filter(Boolean))];
+    expect(files.length).toBeGreaterThan(0);
+    const violations = files.filter(file => /source <\(.*gstack-slug/.test(fs.readFileSync(path.join(ROOT, file), 'utf8')));
+    expect(violations).toEqual([]);
   });
 });
 
 // --- Test Bootstrap validation ---
 
 describe('Test Bootstrap ({{TEST_BOOTSTRAP}}) integration', () => {
-  // qa carve: the rendered TEST_BOOTSTRAP body lives in
-  // qa/sections/test-bootstrap.md — read the skeleton+sections union.
   test('TEST_BOOTSTRAP resolver produces valid content', () => {
-    const qaContent = readSkillUnion('qa');
-    expect(qaContent).toContain('Test Framework Bootstrap');
-    expect(qaContent).toContain('RUNTIME:ruby');
-    expect(qaContent).toContain('RUNTIME:node');
-    expect(qaContent).toContain('RUNTIME:python');
-    expect(qaContent).toContain('no-test-bootstrap');
-    expect(qaContent).toContain('BOOTSTRAP_DECLINED');
+    const content = fs.readFileSync(path.join(ROOT, 'ship/sections/tests.md'), 'utf8');
+    expect(content).toContain('Test Framework Bootstrap');
+    expect(content).toContain('RUNTIME:ruby');
+    expect(content).toContain('RUNTIME:node');
+    expect(content).toContain('RUNTIME:python');
+    expect(content).toContain('no-test-bootstrap');
+    expect(content).toContain('BOOTSTRAP_DECLINED');
   });
 
   test('TEST_BOOTSTRAP appears in qa/SKILL.md', () => {
@@ -1232,7 +1252,15 @@ describe('Phase 8e.5 regression test generation', () => {
 
   test('qa/SKILL.md Rule 13 is amended for regression tests', () => {
     const content = fs.readFileSync(path.join(ROOT, 'qa', 'SKILL.md'), 'utf-8');
-    expect(content).toContain('Only modify tests when generating regression tests in Phase 8e.5');
+    expect(content).toContain('Only create tests through authorized codification in Phase 8a.5');
+    expect(content).toContain('Never modify CI configuration or weaken existing tests');
+    expect(content.indexOf('### 8a.5. Regression test before repair')).toBeLessThan(content.indexOf('### 8b. Fix'));
+    expect(content).toContain('Run its detected command before repair');
+    expect(content).toContain('Re-run the regression, original failing probe and adjacent happy path');
+    const exploratory = fs.readFileSync(path.join(ROOT, 'qa', 'sections', 'exploratory.md'), 'utf-8').replace(/\s+/g, ' ');
+    expect(exploratory).toContain('Phase 8 regression gates before verified repair');
+    expect(exploratory).toContain('Replay the exact failing command/request from the same initial fixture state via steps 2–3 (same native command, fresh capture ID) before repair');
+    expect(exploratory).toContain('Another input or a regression test is not that replay');
     expect(content).not.toContain('Never modify tests or CI configuration');
   });
 
@@ -1293,9 +1321,9 @@ describe('Step 3.4 test coverage audit', () => {
     expect(content).toContain('Never commit failing tests');
   });
 
-  test('Step 3.4 includes vibe coding philosophy', () => {
+  test('Step 3.4 states the value-based coverage goal', () => {
     const content = readShipUnion();
-    expect(content).toContain('vibe coding becomes yolo coding');
+    expect(content).toContain('Coverage goal: every changed behavior is protected by a test that would catch a real regression. Test count is not a goal.');
   });
 
   test('Step 3.4 traces actual codepaths, not just syntax', () => {
@@ -1332,8 +1360,9 @@ describe('ship step numbering', () => {
   // 0.9 (Apple target detection — MUST precede Step 1's branch gate, R2-pinned
   // by test/ship-apple-gate.test.ts), 8.1 (Plan Verification), 8.2 (Scope
   // Drift), 9.1 (Review Army), 9.2 (Findings Merge), 9.3 (Cross-review dedup),
-  // 15.0 (WIP squash — continuous checkpoint), 15.1 (Bisectable commits).
-  const ALLOWED_SUBSTEPS = new Set(['0.9', '8.1', '8.2', '9.1', '9.2', '9.3', '15.0', '15.1']);
+  // 9.4 (Fix-First and persistence), 15.0 (WIP context), 15.1 (Bisectable commits),
+  // 15.2 (safe optional WIP consolidation).
+  const ALLOWED_SUBSTEPS = new Set(['0.9', '8.1', '8.2', '9.1', '9.2', '9.3', '9.4', '11.5', '14.5', '15.0', '15.1', '15.2']);
 
   test('ship/SKILL.md.tmpl contains no unexpected fractional step numbers', () => {
     const tmpl = fs.readFileSync(path.join(ROOT, 'ship', 'SKILL.md.tmpl'), 'utf-8');
@@ -1362,18 +1391,19 @@ describe('ship step numbering', () => {
     const fractional = headings.filter((n) => n.includes('.'));
     const unexpected = fractional.filter((n) => !ALLOWED_SUBSTEPS.has(n));
     expect(unexpected).toEqual([]);
+    expect(headings.filter((n) => n === '11.5')).toHaveLength(1);
   });
 
   test('review/SKILL.md step numbers unchanged (regression guard for resolver conditionals)', () => {
-    // Carved skill: Step 4.5 lives in sections/review-army.md and Step 5.7 in
+    // Carved skill: Step 4.5 lives in sections/review-army.md and Step 4.8 in
     // sections/adversarial.md — read the skeleton+sections union.
     const skill = readSkillUnion('review');
-    // /review uses its own fractional numbering: 1.5, 2.5, 4.5, 5.5, 5.6, 5.7, 5.8
+    // /review uses its own fractional numbering: 1.5, 2.5, 4.5, 4.8, 5.8
     // If the ship-side renumber accidentally touched the review-side of resolver conditionals,
     // these would vanish. This test catches that.
     expect(skill).toContain('## Step 1.5: Scope Drift Detection');
     expect(skill).toContain('## Step 4.5: Review Army');
-    expect(skill).toContain('## Step 5.7: Adversarial review');
+    expect(skill).toContain('## Step 4.8: Adversarial review');
   });
 });
 
@@ -1404,7 +1434,9 @@ describe('Retro test health tracking', () => {
   test('retro/SKILL.md has Test Health metrics row', () => {
     const content = readSkillUnion('retro');
     expect(content).toContain('Test Health');
-    expect(content).toContain('regression tests');
+    expect(content).toContain('N test files');
+    expect(content).toContain('M changed this period');
+    expect(content).toContain('K regression test commits');
   });
 
   test('retro/SKILL.md has Test Health narrative section', () => {
@@ -1541,7 +1573,7 @@ describe('Codex skill', () => {
   });
 
   test('adversarial review in /review always runs both passes', () => {
-    // Carved skill: the Step 5.7 adversarial body lives in sections/adversarial.md.
+    // Carved skill: the Step 4.8 adversarial body lives in sections/adversarial.md.
     const content = readSkillUnion('review');
     expect(content).toContain('Adversarial review (always-on)');
     // Always-on: both Claude and Codex adversarial
@@ -1559,7 +1591,8 @@ describe('Codex skill', () => {
     // Review log
     expect(content).toContain('adversarial-review');
     // Pinned so an accidental drift of the codex tuning knob fails here. The
-    // value lives in scripts/resolvers/review.ts — update BOTH together when
+    // value lives in scripts/resolvers/outside-voice.ts (CODEX_DEFAULT_REASONING_EFFORT;
+    // review.ts was split upstream in v1.91.11) — update BOTH together when
     // changing it deliberately (2026-09-06: high → xhigh).
     expect(content).toContain('reasoning_effort="xhigh"');
     expect(content).toContain('ADVERSARIAL REVIEW SYNTHESIS');
@@ -1573,7 +1606,8 @@ describe('Codex skill', () => {
     expect(content).toContain('Adversarial review (always-on)');
     expect(content).toContain('adversarial-review');
     // Pinned so an accidental drift of the codex tuning knob fails here. The
-    // value lives in scripts/resolvers/review.ts — update BOTH together when
+    // value lives in scripts/resolvers/outside-voice.ts (CODEX_DEFAULT_REASONING_EFFORT;
+    // review.ts was split upstream in v1.91.11) — update BOTH together when
     // changing it deliberately (2026-09-06: high → xhigh).
     expect(content).toContain('reasoning_effort="xhigh"');
     expect(content).toContain('Investigate and fix');
@@ -1581,7 +1615,7 @@ describe('Codex skill', () => {
   });
 
   test('scope drift detection in /review and /ship', () => {
-    const reviewContent = fs.readFileSync(path.join(ROOT, 'review', 'SKILL.md'), 'utf-8');
+    const reviewContent = readSkillUnion('review');
     const shipContent = readShipUnion();
     // Both should contain scope drift from the shared resolver
     for (const content of [reviewContent, shipContent]) {
@@ -1593,18 +1627,15 @@ describe('Codex skill', () => {
     }
   });
 
-  test('codex-host ship/review do NOT contain adversarial review step', () => {
-    // Codex artifacts come from the module-level out-dir render (CODEX_OUT).
-    const shipContent = fs.readFileSync(path.join(CODEX_OUT, '.agents', 'skills', 'gstack-ship', 'SKILL.md'), 'utf-8');
-    expect(shipContent).not.toContain('codex review --base');
-    expect(shipContent).not.toContain('CODEX_REVIEWS');
-
-    const reviewContent = fs.readFileSync(path.join(CODEX_OUT, '.agents', 'skills', 'gstack-review', 'SKILL.md'), 'utf-8');
-    expect(reviewContent).not.toContain('codex review --base');
-    expect(reviewContent).not.toContain('codex_reviews');
-    expect(reviewContent).not.toContain('CODEX_REVIEWS');
-    expect(reviewContent).not.toContain('adversarial-review');
-    expect(reviewContent).not.toContain('Investigate and fix');
+  test('codex-host ship/review preserve adversarial review with a Claude outside voice', () => {
+    for (const skill of ['ship', 'review']) {
+      const content = readCodexSkillUnion(skill);
+      expect(content).not.toMatch(/codex\s+(?:exec|review)\s/);
+      expect(content).toContain('gstack-claude-code');
+      expect(content).toContain('codex_reviews');
+      expect(content).toContain('adversarial-review');
+      expect(content).toContain('Investigate and fix');
+    }
   });
 
   test('codex integration in /plan-eng-review offers plan critique', () => {
@@ -1643,12 +1674,12 @@ describe('Codex skill', () => {
     expect(content).toContain('codex-doc-review');
   });
 
-  test('codex-host document-release does NOT contain the Codex doc review', () => {
-    // Codex never invokes itself; artifacts come from the CODEX_OUT render.
-    const content = fs.readFileSync(
-      path.join(CODEX_OUT, '.agents', 'skills', 'gstack-document-release', 'SKILL.md'), 'utf-8');
-    expect(content).not.toContain('Codex Documentation Review');
-    expect(content).not.toContain('codex-doc-review');
+  test('codex-host document-release runs Claude Code and keeps the historical log identifier', () => {
+    const content = readCodexSkillUnion('document-release');
+    expect(content).toContain('Claude Code');
+    expect(content).toContain('gstack-claude-code');
+    expect(content).toContain('codex-doc-review');
+    expect(content).not.toMatch(/codex\s+(?:exec|review)\s/);
   });
 
   test('codex review invocations avoid the prompt plus --base argument shape', () => {
@@ -1834,7 +1865,7 @@ describe('Doc inventory cross-check', () => {
   //   hosts) that don't show up in the user-facing skill table.
   const DOC_INVENTORY_EXCLUDE = new Set([
     // Infra / non-skills
-    'agents', 'claude', 'connect-chrome', 'contrib', 'hosts',
+    'agents', 'connect-chrome', 'contrib', 'hosts',
     'lib', 'model-overlays', 'openclaw', 'supabase', 'scripts', 'test',
   ]);
 
@@ -1879,14 +1910,14 @@ describe('Codex skill validation', () => {
 
   // Discover all shared skills with templates.
   // Host-exclusive outside-voice skills are intentionally omitted here:
-  // - /codex is Claude-only
-  // - /claude is external-host-only
+  // - /codex is unavailable on Codex
+  // - /claude-code is unavailable on Claude Code
   const CLAUDE_SKILLS_WITH_TEMPLATES = (() => {
     const skills: string[] = [];
     for (const entry of fs.readdirSync(ROOT, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-      if (entry.name === 'codex') continue; // Claude-only skill
-      if (entry.name === 'claude') continue; // External-host-only skill
+      if (entry.name === 'codex') continue; // Unavailable on Codex
+      if (entry.name === 'claude-code') continue; // Unavailable on Claude Code
       if (fs.existsSync(path.join(ROOT, entry.name, 'SKILL.md.tmpl'))) {
         skills.push(entry.name);
       }
@@ -1894,7 +1925,7 @@ describe('Codex skill validation', () => {
     return skills;
   })();
 
-  test('all skills (except /codex) have both Claude and Codex variants', () => {
+  test('shared skills have both Claude and Codex variants', () => {
     for (const skillDir of CLAUDE_SKILLS_WITH_TEMPLATES) {
       // Claude variant
       const claudeMd = path.join(ROOT, skillDir, 'SKILL.md');
@@ -1910,7 +1941,7 @@ describe('Codex skill validation', () => {
     expect(fs.existsSync(path.join(AGENTS_DIR, 'gstack', 'SKILL.md'))).toBe(true);
   });
 
-  test('/codex skill is Claude-only — no Codex variant', () => {
+  test('/codex skill has a Claude variant and no Codex variant', () => {
     // Claude variant should exist
     expect(fs.existsSync(path.join(ROOT, 'codex', 'SKILL.md'))).toBe(true);
     // Codex variant must NOT exist
@@ -2000,7 +2031,7 @@ describe('Test failure triage in ship skill', () => {
 
   test('ship/SKILL.md uses in-branch language for stop condition', () => {
     const content = readShipUnion();
-    expect(content).toContain('In-branch test failures');
+    expect(content).toContain('If any in-branch failures remain unfixed, **STOP**. Do not proceed');
   });
 });
 

@@ -38,6 +38,7 @@ import { existsSync, readFileSync, statSync, readdirSync, accessSync, constants 
 import { join, dirname, basename, resolve, delimiter } from "path";
 import { spawnSync } from "child_process";
 import { homedir } from "os";
+import { resolveStateRoot } from "../lib/state-root";
 
 import { parseSkillManifest, type GbrainManifest, type GbrainManifestQuery, withErrorContext } from "../lib/gstack-memory-helpers";
 
@@ -67,7 +68,7 @@ interface QueryResult {
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const HOME = homedir();
-const GSTACK_HOME = process.env.GSTACK_HOME || join(HOME, ".gstack");
+const GSTACK_HOME = resolveStateRoot();
 // 500ms hard cap per Section 1C; overridable for slow/loaded environments
 // (test harnesses under CI load, cold CLI starts).
 const MCP_TIMEOUT_MS = Math.max(1, parseInt(process.env.GSTACK_BRAIN_TIMEOUT_MS || "", 10) || 500);
@@ -288,7 +289,11 @@ function dispatchFilesystem(q: GbrainManifestQuery, args: CliArgs): QueryResult 
   if (!q.glob) {
     return { query: q, ok: false, rendered: "", bytes: 0, duration_ms: Date.now() - t0, reason: "filesystem kind missing glob" };
   }
-  const { resolved: glob, unresolved } = substituteTemplateVars(q.glob, args);
+  // This named filesystem prefix denotes a literal configured directory, not
+  // glob text. Keep legacy ~ paths and all existing template variables intact.
+  const statePrefix = "{gstack_state_root}/";
+  const configured = q.glob.startsWith(statePrefix);
+  const { resolved: glob, unresolved } = substituteTemplateVars(configured ? q.glob.slice(statePrefix.length) : q.glob, args);
   if (unresolved.length > 0) {
     return {
       query: q,
@@ -303,7 +308,14 @@ function dispatchFilesystem(q: GbrainManifestQuery, args: CliArgs): QueryResult 
   const expanded = glob.replace(/^~/, HOME);
 
   // Simple glob: match against filesystem
-  const matches = simpleGlob(expanded);
+  let matches: string[];
+  if (configured) {
+    try { matches = configuredStateGlob(glob); }
+    catch (error) {
+      return { query: q, ok: false, rendered: "", bytes: 0, duration_ms: Date.now() - t0,
+        reason: error instanceof Error ? error.message : String(error) };
+    }
+  } else matches = simpleGlob(expanded);
   if (matches.length === 0) {
     return { query: q, ok: false, rendered: "", bytes: 0, duration_ms: Date.now() - t0, reason: "no matches" };
   }
@@ -328,6 +340,19 @@ function dispatchFilesystem(q: GbrainManifestQuery, args: CliArgs): QueryResult 
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/** The configured root is literal; only the manifest's suffix is a glob. */
+function configuredStateGlob(pattern: string): string[] {
+  const parts = pattern.split("/");
+  if (parts.some(part => !part || part === "." || part === "..")) return [];
+  const result = spawnSync("bash", ["-c",
+    'context_paths=$(bash "$1") || exit; eval "$context_paths"; printf "%s" "$GSTACK_STATE_ROOT"',
+    "gstack-state-root", join(import.meta.dir, "gstack-paths")], { encoding: "utf8", timeout: 5000 });
+  if (result.error || result.status !== 0 || !result.stdout) throw new Error("Cannot resolve configured gstack state root: "
+    + JSON.stringify({ error: result.error?.message ?? null, status: result.status, signal: result.signal, stderr: result.stderr }));
+  if (!existsSync(result.stdout)) return [];
+  return [...new Bun.Glob(pattern).scanSync({ cwd: result.stdout, absolute: true, onlyFiles: true, followSymlinks: false })];
+}
 
 function simpleGlob(pattern: string): string[] {
   // Handle simple patterns: <dir>/*<glob>* or <dir>/file or <full-path-no-glob>

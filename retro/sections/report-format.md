@@ -15,7 +15,7 @@ Week of Mar 1: 47 commits (3 contributors), 3.2k LOC, 38% tests, 12 PRs, peak: 1
 (from Step 2)
 
 ### Trends vs Last Retro
-(from Step 12, loaded before save — skip if first retro)
+(from Step 12, loaded before save — skip if no matching history; in `compare` mode use **Current vs Prior Period** from the computed prior window even on the first run)
 
 ### Time & Session Patterns
 (from Steps 3-4)
@@ -42,7 +42,7 @@ Narrative covering:
 
 ### Test Health
 - Total test files: N (`TEST_FILES_TOTAL`)
-- Tests added this period: M (`TEST_FILES_CHANGED` — test files changed in the window)
+- Test files changed this period: M (`TEST_FILES_CHANGED`; not newly added test cases)
 - Regression test commits: list the `REGRESSION_COMMIT` lines (`test(qa):`, `test(design):`, and `test: coverage` commits)
 - If prior retro exists and has `test_health`: show delta "Test count: {last} → {now} (+{delta})"
 - If test ratio < 20%: flag as growth area — "100% test coverage is the goal. Tests make vibe coding safe."
@@ -51,9 +51,10 @@ Narrative covering:
 Check review JSONL logs for plan completion data from /ship runs this period:
 
 ```bash
+eval "$(~/.claude/skills/gstack/bin/gstack-paths)"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 setopt +o nomatch 2>/dev/null || true  # zsh compat
 eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
-cat ~/.gstack/projects/$SLUG/*-reviews.jsonl 2>/dev/null | grep '"skill":"ship"' | grep '"plan_items_total"' || echo "NO_PLAN_DATA"
+cat "$GSTACK_STATE_ROOT"/projects/$SLUG/*-reviews.jsonl 2>/dev/null | grep '"skill":"ship"' | grep '"plan_items_total"' || echo "NO_PLAN_DATA"
 ```
 
 If plan completion data exists within the retro time window:
@@ -74,6 +75,12 @@ If no plan data exists, skip this section silently.
 (from Step 8)
 - Focus score with interpretation
 - Ship of the week callout
+
+### Shipping Streaks
+(from Step 11: team and personal streaks, including broken-streak disclosure)
+
+### Shortcut Debt
+(from Step 11.5: marker ledger and count, or the clean-ledger statement)
 
 ### Your Week (personal deep-dive)
 (from Step 9, for the current user only)

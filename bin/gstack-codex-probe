@@ -4,13 +4,13 @@
 #
 # Functions (all prefixed with _gstack_codex_ for namespace hygiene):
 #   _gstack_codex_auth_probe      — multi-signal auth check (env + file)
-#   _gstack_codex_model_probe     — round-trip probe of the configured model (#2477)
+#   _gstack_codex_model_probe     — round-trip probe of gstack's selected model (#2477)
 #   _gstack_codex_version_check   — warn on known-bad Codex CLI versions
-#   _gstack_codex_timeout_wrapper — gtimeout -> timeout -> unwrapped fallback
+#   _gstack_codex_timeout_wrapper — gtimeout -> timeout -> bash-native watchdog
 #   _gstack_codex_log_event       — telemetry emission to ~/.gstack/analytics/
 #
 # Hygiene rules (enforced by test/codex-hardening.test.ts):
-#   - Never set -e / set -u / trap / IFS= / PATH= in this file.
+#   - Never change -e / -u / traps / IFS / PATH in the caller shell.
 #   - All internal vars prefix with _GSTACK_CODEX_.
 #   - All functions prefix with _gstack_codex_.
 #   - No command execution at source time (only function defs).
@@ -38,17 +38,16 @@ _gstack_codex_auth_probe() {
 
 _gstack_codex_model_probe() {
   # Auth-exists is a weaker signal than the auth probe implies: a ChatGPT
-  # account with a stale `model = "..."` pin in ~/.codex/config.toml passes
-  # the auth probe, then EVERY invocation dies with an HTTP 400 ("The
-  # '<model>' model is not supported when using Codex with a ChatGPT
-  # account") and no guidance. A short real round trip with the configured
-  # model catches model rejection, entitlement changes, and stale pins in
-  # one shot (#2477).
+  # account can be valid while the model gstack will request is unavailable.
+  # A short real round trip with gstack's selected model catches model
+  # rejection and entitlement changes in one shot (#2477). gstack pins a
+  # frontier default rather than inheriting Codex CLI's built-in default,
+  # because that default can lag the most capable available model.
   #
   # Contract:
   #   MODEL_OK (exit 0)              — round trip succeeded; cached 1h.
   #   MODEL_UNUSABLE (exit 1)        — deterministic model 400; hints printed.
-  #     Cached 15 min: the 400 is config-driven, so re-probing every preflight
+  #     Cached 15 min: the 400 is model/entitlement-driven, so re-probing every preflight
   #     charged the affected user a 30s round trip + real tokens per review
   #     section, forever. Editing config.toml (the fix) changes the cache
   #     signature and re-probes immediately; the short TTL covers server-side
@@ -64,28 +63,35 @@ _gstack_codex_model_probe() {
   # Only call this AFTER _gstack_codex_auth_probe passes — probing without
   # auth just measures the auth failure again.
   local _codex_home="${CODEX_HOME:-$HOME/.codex}"
-  local _gstack_home="${GSTACK_HOME:-$HOME/.gstack}"
-  local _cache="$_gstack_home/.codex-model-probe"
-  # Cache signature: config.toml + auth.json mtimes. Editing the model pin
-  # or re-logging-in invalidates the cached MODEL_OK immediately.
+  # State root from the shared twin (sourced in a subshell, so the caller's
+  # shell is untouched). A missing twin only disables the cache.
+  local _gstack_home _cache=""
+  _gstack_home="$(. "${BASH_SOURCE[0]%/*}/gstack-state-root.sh" 2>/dev/null && gstack_state_root)" || _gstack_home=""
+  [ -n "$_gstack_home" ] && _cache="$_gstack_home/.codex-model-probe"
+  local _model="${GSTACK_CODEX_MODEL:-gpt-6-astra}"
+  # Cache signature: config.toml + auth.json mtimes + gstack model selection.
+  # Editing the model env/config or re-logging-in invalidates the cached result
+  # immediately.
   # GNU-first stat order + numeric validation (the #2195 pattern): on GNU
   # stat, `-f` means FILESYSTEM mode, so the BSD-first form emitted a
   # multi-line filesystem block on Linux — the signature then never matched
   # its own cache line and the cache missed on every read. BSD stat rejects
   # `-c` cleanly, so GNU-first degrades correctly on macOS.
-  local _cfg_m _auth_m _sig
+  local _cfg_m _auth_m _model_sig _sig
   _cfg_m=$(stat -c %Y "$_codex_home/config.toml" 2>/dev/null || stat -f %m "$_codex_home/config.toml" 2>/dev/null || echo 0)
   _auth_m=$(stat -c %Y "$_codex_home/auth.json" 2>/dev/null || stat -f %m "$_codex_home/auth.json" 2>/dev/null || echo 0)
   case "$_cfg_m" in ''|*[!0-9]*) _cfg_m=0 ;; esac
   case "$_auth_m" in ''|*[!0-9]*) _auth_m=0 ;; esac
+  _model_sig=$(printf '%s' "$_model" | sed 's/[^A-Za-z0-9._:-]/_/g')
   # The skills FORCE this effort at call time (they pass -c themselves), so the
-  # probe must exercise the same pair. It is part of the signature: changing the
-  # forced effort must re-probe, not serve a stale MODEL_OK from the old pair.
+  # probe must exercise the same model+effort pair. It is part of the signature:
+  # changing the forced effort must re-probe, not serve a stale MODEL_OK from the
+  # old pair.
   local _probe_effort="xhigh"
-  _sig="${_cfg_m}-${_auth_m}-${_probe_effort}"
+  _sig="${_cfg_m}-${_auth_m}-${_model_sig}-${_probe_effort}"
   local _now
   _now=$(date +%s 2>/dev/null || echo 0)
-  if [ -f "$_cache" ]; then
+  if [ -n "$_cache" ] && [ -f "$_cache" ]; then
     local _c_line _c_status _c_ts _c_sig
     _c_line=$(head -1 "$_cache" 2>/dev/null)
     _c_status=$(printf '%s' "$_c_line" | cut -d' ' -f1)
@@ -98,27 +104,25 @@ _gstack_codex_model_probe() {
     fi
     if [ "$_c_status" = "MODEL_UNUSABLE" ] && [ "$_c_sig" = "$_sig" ] && [ $((_now - _c_ts)) -lt 900 ]; then
       echo "MODEL_UNUSABLE (cached)"
-      echo "HINT: the rejected model comes from the 'model = ' line in $_codex_home/config.toml."
-      echo "HINT: check its [notice.model_migrations] table — Codex records the intended replacement there."
+      echo "HINT: gstack requested model '$_model'."
+      echo "HINT: set GSTACK_CODEX_MODEL=<supported-model> or pass an explicit -c model=... override."
       return 1
     fi
   fi
   local _out _code _why
-  # Probe the model AND the effort the skills actually send. Without the -c the
-  # probe passes on a config pinned to `high` while every real invocation dies
-  # with a 400, because the skills override effort per call.
+  # Probe the model AND the effort the skills actually send. Without the effort
+  # -c the probe passes on a config pinned to `high` while every real invocation
+  # dies with a 400, because the skills override effort per call.
   _out=$(_gstack_codex_timeout_wrapper 30 codex exec --skip-git-repo-check -s read-only \
-    -c "model_reasoning_effort=\"$_probe_effort\"" "reply OK" </dev/null 2>&1)
+    -c "model=\"$_model\"" -c "model_reasoning_effort=\"$_probe_effort\"" "reply OK" </dev/null 2>&1)
   _code=$?
   if [ "$_code" -eq 0 ]; then
-    mkdir -p "$_gstack_home" 2>/dev/null || true
-    printf 'MODEL_OK %s %s\n' "$_now" "$_sig" > "$_cache" 2>/dev/null || true
+    [ -n "$_cache" ] && { mkdir -p "$_gstack_home" 2>/dev/null; printf 'MODEL_OK %s %s\n' "$_now" "$_sig" > "$_cache" 2>/dev/null; }
     echo "MODEL_OK"
     return 0
   fi
   if printf '%s' "$_out" | grep -qiE 'model.{0,40}is not supported|"status":[[:space:]]*400'; then
-    mkdir -p "$_gstack_home" 2>/dev/null || true
-    printf 'MODEL_UNUSABLE %s %s\n' "$_now" "$_sig" > "$_cache" 2>/dev/null || true
+    [ -n "$_cache" ] && { mkdir -p "$_gstack_home" 2>/dev/null; printf 'MODEL_UNUSABLE %s %s\n' "$_now" "$_sig" > "$_cache" 2>/dev/null; }
     echo "MODEL_UNUSABLE"
     # Match effort/reasoning too: an effort 400 says "[ReasoningEffortParam]
     # [reasoning.effort] Invalid value ..." and contains no "model" at all, so a
@@ -130,11 +134,12 @@ _gstack_codex_model_probe() {
     _why=$(printf '%s\n' "$_out" | grep -iE "is not supported|invalid_enum_value|Invalid value|reasoning\\.effort|requires a newer version" | head -3)
     [ -z "$_why" ] && _why=$(printf '%s\n' "$_out" | grep -iE "model|effort|reasoning" | head -3)
     printf '%s\n' "$_why"
-    echo "HINT: the rejected model comes from the 'model = ' line in $_codex_home/config.toml."
-    echo "HINT: check its [notice.model_migrations] table — Codex records the intended replacement there."
+    echo "HINT: gstack requested model '$_model'."
+    echo "HINT: set GSTACK_CODEX_MODEL=<supported-model> or pass an explicit -c model=... override."
     echo "HINT: if the message names reasoning.effort, the model is fine but does not support"
-    echo "      '$_probe_effort'. The skills force that effort per call; lower it in the resolvers"
-    echo "      (scripts/resolvers/{review,design}.ts) or pick a model that supports it."
+    echo "      '$_probe_effort'. The skills force that effort per call; lower it at the source"
+    echo "      (CODEX_DEFAULT_REASONING_EFFORT in scripts/resolvers/outside-voice.ts, plus"
+    echo "      scripts/resolvers/{design,index}.ts and codex/**/*.tmpl) or pick a model that supports it."
     _gstack_codex_log_event "codex_model_unusable" 2>/dev/null || true
     return 1
   fi
@@ -213,19 +218,15 @@ _gstack_codex_timeout_wrapper() {
     # capture on the orphaned sleep.
     "$@" &
     local _cmd_pid=$!
-    ( sleep "$_duration" && kill -TERM "$_cmd_pid" 2>/dev/null ) >/dev/null 2>&1 &
+    ( sleep "$_duration" && trap '' TERM && kill -TERM "$_cmd_pid" 2>/dev/null && exit 124 ) >/dev/null 2>&1 &
     local _watch_pid=$!
     local _rc
     wait "$_cmd_pid"
     _rc=$?
-    if kill -0 "$_watch_pid" 2>/dev/null; then
-      # Command finished before the deadline. Retiring the watchdog subshell
-      # also defuses its pending kill (the `&& kill` lives in the subshell);
-      # its detached sleep expires harmlessly.
-      kill "$_watch_pid" 2>/dev/null
-      wait "$_watch_pid" 2>/dev/null
-    elif [ "$_rc" -ge 128 ]; then
-      _rc=124  # killed by the watchdog: report timeout(1)'s code
+    kill "$_watch_pid" 2>/dev/null
+    wait "$_watch_pid" 2>/dev/null
+    if [ "$?" -eq 124 ]; then
+      _rc=124
     fi
     return "$_rc"
   fi
@@ -243,12 +244,15 @@ _gstack_codex_log_event() {
   local _event="$1"
   local _duration="${2:-0}"
   [ "${_TEL:-off}" = "off" ] && return 0
-  mkdir -p "$HOME/.gstack/analytics" 2>/dev/null || return 0
+  local _root
+  _root="$(. "${BASH_SOURCE[0]%/*}/gstack-state-root.sh" 2>/dev/null && gstack_state_root)" || return 0
+  [ -n "$_root" ] || return 0
+  mkdir -p "$_root/analytics" 2>/dev/null || return 0
   local _ts
   _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)
   printf '{"skill":"codex","event":"%s","duration_s":"%s","ts":"%s"}\n' \
     "$_event" "$_duration" "$_ts" \
-    >> "$HOME/.gstack/analytics/skill-usage.jsonl" 2>/dev/null || true
+    >> "$_root/analytics/skill-usage.jsonl" 2>/dev/null || true
 }
 
 # --- Learnings log on hang --------------------------------------------------

@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { ALL_TIERS, PTY_LONG_MS } from './helpers/eval-budgets';
+import { ALL_TIERS, PTY_LONG_MS, assertPaidTestBudget } from './helpers/eval-budgets';
 import { isPaidTestFile } from './helpers/paid-test-set';
 import { DEFAULT_SHARD_TIMEOUT_MS } from '../scripts/test-paid-shards';
 
@@ -40,7 +40,14 @@ describe('eval budget tiers', () => {
     expect(Math.max(...values)).toBe(PTY_LONG_MS);
   });
 
-  test('no paid-test timeout literal exceeds the ceiling tier', () => {
+  test('deploy workflow sessions use capture budgets, not single-call judge budgets', () => {
+    const source = fs.readFileSync(path.join(ROOT, 'test/skill-e2e-deploy.test.ts'), 'utf8');
+    expect(source).not.toContain('JUDGE_MS');
+    expect([...source.matchAll(/timeout:\s*CAPTURE_MS/g)]).toHaveLength(6);
+    expect([...source.matchAll(/\},\s*CAPTURE_LONG_MS\);/g)]).toHaveLength(6);
+  });
+
+  test('paid timeouts above the ordinary ceiling are rejected', () => {
     const out = spawnSync('git', ['ls-files', 'test/*.test.ts'], { cwd: ROOT, encoding: 'utf-8', timeout: 30_000 });
     const files = out.stdout.split('\n').filter((f) => f && isPaidTestFile(f));
     expect(files.length).toBeGreaterThan(50); // scan-rot guard
@@ -51,12 +58,12 @@ describe('eval budget tiers', () => {
       // Trailing test-timeout args: `}, 1_234_000);` / `}, 300000);`
       for (const m of source.matchAll(/\}\s*,\s*(\d[\d_]*)\s*(?:\/\*[^*]*\*\/\s*)?\)/g)) {
         const ms = Number(m[1].replaceAll('_', ''));
-        if (ms > PTY_LONG_MS * 1.25) offenders.push(`${rel}: ${m[1]}`);
+        try { assertPaidTestBudget(rel, ms); } catch { offenders.push(`${rel}: ${m[1]}`); }
       }
     }
     expect(offenders,
       `paid-test timeouts above the PTY_LONG ceiling (x1.25 slack) are fiction ` +
-      `against the ${DEFAULT_SHARD_TIMEOUT_MS / 1000}s shard wall — split the test instead:\n${offenders.join('\n')}`,
+      `against the ${DEFAULT_SHARD_TIMEOUT_MS / 1000}s ordinary wall:\n${offenders.join('\n')}`,
     ).toEqual([]);
   });
 });

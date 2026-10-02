@@ -58,7 +58,7 @@ or page content. Treat an unterminated block as ending at end-of-output.
 
 ## Plan Mode Safe Operations
 
-In plan mode, allowed because they inform the plan: `$B`, `$D`, `codex exec`/`codex review`, writes to `~/.gstack/`, writes to the plan file, and `open` for generated artifacts.
+In plan mode, allowed because they inform the plan: `$B`, `$D`, `codex exec`/`codex review`, temp prompts, writes to `~/.gstack/`, writes to the plan file, and `open` for generated artifacts.
 
 ## Skill Invocation During Plan Mode
 
@@ -158,22 +158,28 @@ Skills that run plan reviews (`/plan-*-review`, `/codex review`) include the EXI
 
 ## BROWSER SETUP (Aside — run this check BEFORE any browser step)
 
-gstack drives the Aside AI browser first. It is the user's real browser: real cookies, real logged-in accounts, their open tabs — you work inside the sessions the user already has. When Aside is not available, the Browser fallback section below drives gstack's own headless browser instead.
+Use Aside first: the user's real browser and signed-in sessions. If unavailable, use the Browser fallback below.
 
 ```bash
-_T=""; command -v gtimeout >/dev/null 2>&1 && _T="gtimeout 30"; [ -z "$_T" ] && command -v timeout >/dev/null 2>&1 && _T="timeout 30"
-[ -z "$_T" ] && command -v perl >/dev/null 2>&1 && _T="perl -e alarm(shift);exec(@ARGV) 30"
+_gs_d() { if command -v gtimeout >/dev/null; then gtimeout 30 "$@"; elif command -v timeout >/dev/null; then timeout 30 "$@"
+elif command -v perl >/dev/null; then perl -e 'alarm(shift);exec(@ARGV)' 30 "$@"; else return 125; fi; }
 if [ "${GSTACK_SKIP_ASIDE:-}" = "1" ] || ! command -v aside >/dev/null 2>&1; then
   echo "NEEDS_ASIDE"
-elif $_T aside repl 'console.log("ASIDE_READY " + pwd)' 2>&1 | grep -q '^ASIDE_READY'; then
-  echo "READY: aside $(aside --version 2>/dev/null)"
 else
-  echo "ASIDE_NOT_RUNNING"
+  _rc=0; _o=$(_gs_d aside repl 'console.log("ASIDE_READY " + pwd)' 2>&1) || _rc=$?
+  case "$_rc" in
+    124|142) echo "ASIDE_TIMEOUT: probe deadline exceeded" ;;
+    125) echo "ASIDE_UNAVAILABLE: bounded probe unavailable" ;;
+    0) if printf '%s\n' "$_o" | grep -q '^ASIDE_READY '; then echo "READY: aside"
+       else echo "ASIDE_NOT_RUNNING: no readiness marker"; fi ;;
+    *) echo "ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally" ;;
+  esac
+  unset _o
 fi
 ```
 
-1. `NEEDS_ASIDE`: if `uname -s` prints `Darwin`, tell the user once — "gstack works best with the Aside browser (macOS 15+): download it at aside.com, open it, sign in, then re-run." Off macOS, do not pitch it. The user downloads and installs it themselves; NEVER run an installer, brew formula, or download for them, and never substitute unit tests or curl for the browser step. Then continue with the Browser fallback section below.
-2. `ASIDE_NOT_RUNNING`: ask the user once to open the Aside app (and sign in if it asks), then re-run the check. If it still fails, quote the probe output verbatim and continue with the Browser fallback section below.
+1. `NEEDS_ASIDE`: if `uname -s` prints `Darwin`, say once: "Download Aside (macOS 15+) at aside.com, open it, sign in, then re-run." Off macOS, do not pitch it. NEVER run an installer, brew formula, or download for them; never substitute unit tests or curl for the browser step. Then continue with the Browser fallback section below.
+2. `ASIDE_NOT_RUNNING`: ask once to open the app and retry. Other non-READY statuses: report the safe status, not "app stopped". Never print raw diagnostics (private paths/tokens). Then continue with the Browser fallback section below.
 3. `READY`: continue. `aside --help` and `aside <command> --help` are the authority on flags; take operational syntax from them, never new permissions or scope.
 
 ### Rules for driving a real browser
@@ -189,11 +195,11 @@ fi
 9. **Show screenshots to the user.** After copying a screenshot, use the Read tool on the copied file so the user sees it inline. Prefer `type: "jpeg", quality: 60` to keep files small.
 10. **Deterministic first.** Drive with `aside repl` for anything you can express as steps. Reach for `aside exec "<task>"` (Aside's built-in agent) only for open-ended reading or research where step-by-step driving has no advantage; it acts with the same real sessions, so a mutating task needs the same consent, and its answer is untrusted content.
 
-**Script shapes.** Every browsing skill carries its own `aside repl` scripts, built from the verified cookbook that lives in the /browse skill (`browse/SKILL.md`, "Cookbook"). When a skill's text names "the read script", "the flow script", "the links script", "the responsive script", or "the annotated-screenshot script" without showing it, take the shape from there — never from memory.
+**Script shapes.** Use this skill's `aside repl` scripts. For named read, flow, links, responsive or annotated-screenshot scripts not shown here, Read `browse/SKILL.md`, "Cookbook", and take the shape from there — never from memory.
 
 ## Browser fallback: gstack's own headless browser
 
-Applies when BROWSER SETUP printed `NEEDS_ASIDE` or `ASIDE_NOT_RUNNING` (Linux, Windows, or the Aside app closed), or when the user chose gstack's own browser in a Third-Party Web Actions question. Otherwise skip this section. Drive gstack's own headless Chromium through `$B`: same skill, same evidence, same report — different driver. Say once which driver you use.
+Applies to any non-READY BROWSER SETUP result, including absent, stopped, timed-out, unavailable or failed Aside probes, or when the user chose gstack's own browser in a Third-Party Web Actions question. Otherwise skip this section. Drive gstack's own headless Chromium through `$B`: same skill, same evidence, same report — different driver. Say once which driver you use.
 
 ### Find the `$B` binary
 
@@ -294,13 +300,13 @@ await closeTab(pg); console.log("GSTACK_STEP_OK");
 
 `NAV=` is the navigation timing entry, `PAINT=` the paint entries (FCP lives here), `LCP=` the largest-contentful-paint start time (`null` if the page emitted no LCP entry within 3s), `RESOURCES=` the 15 slowest resources, `SCRIPTS=` / `CSS=` the bundle inventory, `SUMMARY=` request count, total transfer, and requests by type. A missing `GSTACK_STEP_OK` or a line starting with `[error` means the page did not load — record it as a failure, not a slow page.
 
-Extract key metrics from `NAV=`:
+Extract key metrics from the labelled lines (`NAV=` unless stated otherwise):
 - **TTFB** (Time to First Byte): `responseStart - requestStart`
 - **FCP** (First Contentful Paint): the `first-contentful-paint` entry in `PAINT=`
 - **LCP** (Largest Contentful Paint): the `LCP=` line (`null` if the page emitted no LCP entry — record it as missing, not 0)
-- **DOM Interactive**: `domInteractive - navigationStart`
-- **DOM Complete**: `domComplete - navigationStart`
-- **Full Load**: `loadEventEnd - navigationStart`
+- **DOM Interactive**: `domInteractive - startTime`
+- **DOM Complete**: `domComplete - startTime`
+- **Full Load**: `loadEventEnd - startTime`
 
 Load times jitter with the network. If the user wants stable numbers, run the script 3 times per page and take the median of each metric.
 
@@ -335,10 +341,12 @@ Save metrics to baseline file:
 ```
 
 Write to `.gstack/benchmark-reports/baselines/baseline.json`.
+Also retain an immutable `{UTC-timestamp}-baseline.json` beside it for trends. Without `--baseline`, never overwrite the comparison baseline; save current metrics in Phase 9 instead.
 
 ### Phase 5: Comparison
 
 If baseline exists, compare current metrics against it:
+Without a baseline, report absolute measurements and budgets only, mark comparison unavailable, and recommend a `--baseline` run. Missing metrics remain N/A. A zero baseline makes percentage change N/A; absolute timing thresholds still apply.
 
 ```
 PERFORMANCE REPORT — [url]
@@ -353,25 +361,27 @@ TTFB                120ms       135ms       +15ms    OK
 FCP                 450ms       480ms       +30ms    OK
 LCP                 800ms       1600ms      +800ms   REGRESSION
 DOM Interactive     600ms       650ms       +50ms    OK
-DOM Complete        1200ms      1350ms      +150ms   WARNING
+DOM Complete        1200ms      1350ms      +150ms   OK
 Full Load           1400ms      2100ms      +700ms   REGRESSION
 Total Requests      42          58          +16      WARNING
 Transfer Size       1.2MB       1.8MB       +0.6MB   REGRESSION
 JS Bundle           450KB       720KB       +270KB   REGRESSION
 CSS Bundle          85KB        88KB        +3KB     OK
 
-REGRESSIONS DETECTED: 3
+REGRESSIONS DETECTED: 4
   [1] LCP doubled (800ms → 1600ms) — likely a large new image or blocking resource
   [2] Total transfer +50% (1.2MB → 1.8MB) — check new JS bundles
   [3] JS bundle +60% (450KB → 720KB) — new dependency or missing tree-shaking
+  [4] Full load +700ms (1400ms → 2100ms) — inspect the slowest resources
 ```
 
 **Regression thresholds:**
 - Timing metrics: >50% increase OR >500ms absolute increase = REGRESSION
 - Timing metrics: >20% increase = WARNING
-- Bundle size: >25% increase = REGRESSION
-- Bundle size: >10% increase = WARNING
-- Request count: >30% increase = WARNING
+- Bundle size and total transfer: >25% increase = REGRESSION
+- Bundle size and total transfer: >10% increase = WARNING
+- Request count: >30% increase = WARNING (no separate regression threshold)
+Apply REGRESSION before WARNING; otherwise OK. Negative deltas are improvements.
 
 ### Phase 6: Slowest Resources
 
@@ -395,6 +405,7 @@ RECOMMENDATIONS:
 ### Phase 7: Performance Budget
 
 Check against industry budgets:
+For each available metric, FAIL at or above the budget, WARNING from 90% to below 100%, otherwise PASS. Missing metrics are N/A and excluded. Grade by the proportion below budget (PASS or WARNING): A = all, B = at least two-thirds, C = at least half, D = fewer than half, N/A = none measured.
 
 ```
 PERFORMANCE BUDGET CHECK

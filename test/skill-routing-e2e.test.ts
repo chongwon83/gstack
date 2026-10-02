@@ -46,7 +46,7 @@ if (evalsEnabled && !process.env.EVALS_ALL) {
 
 // Apply EVALS_TIER filter (same logic as e2e-helpers.ts)
 if (evalsEnabled && process.env.EVALS_TIER) {
-  const tier = process.env.EVALS_TIER as 'gate' | 'periodic';
+  const tier = process.env.EVALS_TIER as 'gate' | 'periodic' | 'marathon';
   const tierTests = Object.entries(E2E_TIERS)
     .filter(([, t]) => t === tier)
     .map(([name]) => name);
@@ -79,6 +79,7 @@ function installSkills(tmpDir: string) {
   ];
 
   const targetBase = path.join(tmpDir, '.claude', 'skills');
+  const installedSkills: string[] = [];
 
   for (const skill of skillDirs) {
     const srcPath = path.join(ROOT, skill, 'SKILL.md');
@@ -88,8 +89,11 @@ function installSkills(tmpDir: string) {
     const destDir = path.join(targetBase, skillName);
     fs.mkdirSync(destDir, { recursive: true });
     fs.writeFileSync(path.join(destDir, 'SKILL.md'), extractSkillHead(srcPath));
+    installedSkills.push(skillName);
   }
 
+  // The names-only catalog keeps new CLI built-ins from changing the candidate
+  // set. Descriptions still choose the skill; no request-to-skill answer key.
   // Write a CLAUDE.md with a GENERIC invoke-skills nudge — deliberately NO
   // per-skill routing table. These journey tests exist to catch skill
   // DESCRIPTION regressions (their touchfiles key on */SKILL.md.tmpl), and
@@ -102,7 +106,11 @@ function installSkills(tmpDir: string) {
 
 ## Skill routing
 
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
+This project uses the following installed gstack skills: ${installedSkills.join(', ')}.
+Choose among this project catalog by matching the request to the skill descriptions.
+The CLI's built-in skills are outside this project's workflow.
+
+When the user's request matches an available project skill, ALWAYS invoke it using the Skill
 tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
 The skill has specialized workflows that produce better results than ad-hoc answers.
 Choose the skill by matching the request against each skill's description.
@@ -577,6 +585,52 @@ export default app;
 
       expect(skillCalls.length, `Expected Skill tool to be called but got 0 calls. Claude may have answered directly without invoking a skill. Tool calls: ${result.toolCalls.map(tc => tc.tool).join(', ')}`).toBeGreaterThan(0);
       expect([expectedSkill], `Expected skill ${expectedSkill} but got ${actualSkill}`).toContain(actualSkill);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }, CAPTURE_MS);
+
+  testIfSelected('journey-negatives', async () => {
+    // Casual or off-topic prompts that share routing keywords ("wtf",
+    // "algorithm", "send it to the team") must not invoke a skill. Folded
+    // from the retired Opus 4.7 routing eval; same bound: at most one of the
+    // three may route.
+    const cases = [
+      { name: 'neg-syntax-q', prompt: 'wtf does this Python list comprehension syntax even mean, [x for x in y if z]?' },
+      { name: 'neg-algo-q', prompt: 'does this bubble sort algorithm actually work in O(n log n)?' },
+      { name: 'neg-slack-send', prompt: 'can you help me write the slack message? I want to send it to the team.' },
+    ];
+    const tmpDir = createRoutingWorkDir('negatives');
+    try {
+      const results = await Promise.all(cases.map(async c => {
+        const result = await runSkillTest({
+          prompt: c.prompt,
+          workingDirectory: tmpDir,
+          maxTurns: 2,
+          allowedTools: ['Skill', 'Read'],
+          timeout: JUDGE_MS,
+          testName: `journey-negatives-${c.name}`,
+          runId,
+        });
+        const skillCalls = result.toolCalls.filter(tc => tc.tool === 'Skill');
+        const actualSkill = skillCalls.length > 0 ? skillCalls[0]?.input?.skill : undefined;
+        logCost(`journey: journey-negatives ${c.name}`, result);
+        evalCollector?.addTest({
+          name: `journey-negatives-${c.name}`,
+          suite: 'Skill Routing E2E',
+          tier: 'e2e',
+          passed: actualSkill === undefined,
+          duration_ms: result.duration,
+          cost_usd: result.costEstimate.estimatedCost,
+          transcript: result.transcript,
+          output: `routed=${actualSkill ?? '(none)'}`,
+          turns_used: result.costEstimate.turnsUsed,
+          exit_reason: result.exitReason,
+        });
+        return { name: c.name, actualSkill };
+      }));
+      const routed = results.filter(r => r.actualSkill !== undefined);
+      expect(routed.length, `negatives routed: ${routed.map(r => `${r.name}→${r.actualSkill}`).join(', ')}`).toBeLessThanOrEqual(1);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
