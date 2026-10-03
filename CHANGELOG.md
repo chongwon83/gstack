@@ -1,5 +1,84 @@
 # Changelog
 
+## [1.91.15.0] - 2026-10-03
+
+**Skills read cleanly on Opus 5.5: stale facts fixed, shouting turned down, and the tests that locked the shouting in now check behavior.**
+**gbrain ingests coding-agent transcripts only after you say yes.**
+
+We ran Anthropic's `/claude-api prompt-audit` (target `claude-opus-5-5`) over every skill template, resolver, model overlay, CLAUDE.md and the code that builds model requests. Then we swept the tests that pin skill wording. gstack had almost none of the old "think step by step" scaffolding. What it did have was instructions that pointed at the wrong file or command, CRITICAL/MUST stacks that current models over-apply, arithmetic the model was asked to compute, and issue numbers it can't use. Those are fixed or rewritten at normal volume, with every real rule and its reason kept. A safety rule only changed wording where an eval shows the model still obeys it.
+
+### What changes for you
+
+- **Transcripts need your consent.** `/sync-gbrain` and the gbrain sync skip Claude Code and Codex session transcripts until `transcript_ingest_mode` is `recent` (last 90 days) or `all`. If you never chose, the sync prints one line saying how. Other memory keeps syncing. Choose with `/sync-gbrain` or `gstack-config set transcript_ingest_mode recent|all|off`. Older stored answers (letters, `incremental`) get asked again. Staged transcript pages wait on disk until you consent.
+- **`proactive=false` means no suggestions at all**, including "want me to run /X?". `gstack-config set proactive true` restores them.
+- **Model overlays:** Opus 5.5, Sonnet 5.5 and other point releases use the generic Claude overlay. The Opus 4.7, Opus 4.8 and Sonnet 5 overlays apply only to those exact models (bare ID, dated snapshot or `-latest`). `--model <family>` forces one.
+- **open-gstack-browser asks before replacing a live browser** instead of killing it, and leaves it running when nobody can answer.
+- **setup-gbrain no longer writes its own CLAUDE.md search block**; `/sync-gbrain` is the one writer.
+- **Upgrade:** run `/gstack-upgrade`, then start a new session.
+
+### Itemized changes
+
+#### Fixed
+- Skill instructions that contradicted the code. Examples: the router's empty telemetry session ID; the design board flow that waited on a command that now exits; an unexpanded `$_DESIGN_DIR` in the reload call; wrong Pretext API signatures in /design-html; a /make-pdf flag that doesn't exist; /land-and-deploy falling back to bare `bun test` and reading only the legacy eval store; stale /ship step numbers; hardcoded `main`/`origin/main`; "Mac only" claims the installer contradicts; tab-state fields the terminal agent misnamed; spec flags that aren't flags; autoplan skipping renamed sections.
+- The shared test bootstrap undoes only the changes it made, instead of a blanket `git checkout`.
+- Skills that read or wrote a literal `~/.gstack` path now use your configured state root (`GSTACK_STATE_ROOT` / `GSTACK_HOME`): canary and health history, plan-tune gates and proposals, retro reads, ship ledgers, the telemetry sink and gbrain context queries. Custom state directories no longer miss data.
+- The browse untrusted-content warning names both marker formats the binary prints.
+- The "never ingest transcripts" choice is enforced in code, not just described.
+- /plan-tune describes the never-ask hook accurately.
+- Seven conflicts between instruction files are settled:
+  - `PROACTIVE=false` means no suggestions, not even an offer.
+  - /sync-gbrain alone writes the CLAUDE.md search block.
+  - /ship uses the checklist's critical categories.
+  - /plan-design-review runs Step 0 before mockups.
+  - DX triage keeps every pass and reports blockers only.
+  - When a DESIGN.md exists, it decides what /design-shotgun varies.
+  - ETHOS.md describes how its principles actually reach skills.
+
+#### Changed
+- **Normal-volume instructions.** CRITICAL / IRON LAW / MUST stacks, thoroughness boosters, fixed progress cadences and model-computed point scores are rewritten as plain rules and stop conditions. Incident and issue numbers move out of runtime prose. The /document-release CHANGELOG-preservation and VERSION-ask rules changed wording only after the document-release eval passed on both the old and new text. Rules without such an eval keep their wording (listed in TODOS.md).
+- **Tests check behavior, not sentences.** Prose-pinning test files keep step order, routing tables, safety lines (matched on meaning) and the markers software reads, and drop exact-sentence pins. Each conversion was checked by a scripted mutation pass: reordering a step, deleting a marker or deleting a safety line turns the test red, while rewording dropped prose leaves it green.
+- **Evals measure the skill instead of coaching it.** The document-release eval no longer tells the agent the answer. The routing evals use the routing text gstack ships. The graders check outcomes rather than exact phrases or emoji. The dedicated-tools overlay case passes on correct output plus at least 20% fewer Bash calls (contract v3).
+- Six paid cases that only had a model summarize SKILL.md are retired, along with duplicate checks. office-hours-auto-mode joins the fast PR profile.
+- New `test/instruction-facts.test.ts` keeps CLAUDE.md facts, /ship step references and state-root paths in step with the code. A config-key tripwire fails when a config key has no reader.
+- CLAUDE.md defines when prompt bytes are a test contract in this repo: when software reads them, or when a recorded eval shows the wording matters.
+
+## [1.91.13.0] - 2026-10-02
+
+**/autoplan runs again for anyone with a SessionStart hook, and /land-and-deploy never merges over red CI.**
+**Projects in nested Git groups stop sharing saved state.**
+
+This release fixes the most severe open bugs from a triage of the tracker. /autoplan's phase guard denied every phase when Claude Code's session journal opened with SessionStart hook output, which is the normal shape once any plugin installs a hook, and on Windows it also rejected forward-slash and `/c/` paths. /land-and-deploy treated "no required checks" as "nothing to wait for", so on any repo without branch protection (every private repo on GitHub Free) it could merge while CI was red or still running. Repos under `group/subgroup/repo` remotes collapsed into one `~/.gstack/projects/` bucket, so /context-restore could offer another project's checkpoint.
+
+### What changes for you
+
+- **/autoplan:** works in sessions with SessionStart hooks, after `/compact`, `/clear` and a forked resume, and on Windows. When it does block, the message names the reason and how to run the reviews by hand (`docs/autoplan-guard-troubleshooting.md`). If a future Claude Code journal shape is unrecognized but healthy, /autoplan warns "phase publication was NOT verified for this session" and continues instead of locking you out.
+- **/land-and-deploy is stricter.** It now waits for all checks on the exact commit it merges, not only required ones, and that includes `gh pr merge --auto`. A red or pending optional check, or a commit with no CI at all, needs your explicit approval for that commit. The verdict comes from `bin/gstack-ci-gate` (`--help` documents it).
+- **Nested-group remotes** (GitLab subgroups, Azure DevOps, Bitbucket Server) now get their own `projects/<repo>-<hash>/` bucket. GitHub buckets do not move. The old shared bucket is left in place; `gstack-slug --adopt-legacy` lists it and copies only the files you confirm. /context-restore only treats this project's checkpoints as latest.
+- **never-ask preferences now fire** (#2901). Questions you tuned to never-ask through /plan-tune will start auto-deciding. One-way questions, including the new land-and-deploy CI approvals, never auto-decide.
+- **Upgrade:** run `/gstack-upgrade`, then start a new Claude Code session.
+
+### Itemized changes
+
+#### Fixed
+- /autoplan publication guard accepts real Claude Code journals: SessionStart attachment chains, a forked session that starts at a compact boundary, and Windows path spellings, with typed reason codes and per-reason messages (#3007, #3009, #2968, #2977, #2986, #3006). Built on #3010 by @CharlesBerg85, with root rules from #3008 by @laurenbdaniels-coder, #2969 by @maydaycyber and #2960 by @elmesery-dev.
+- /land-and-deploy no longer merges over red, pending or missing CI when a repo declares no required checks (#2995). Logic from #3001 by @harshitgavita-07, moved into a tested helper.
+- Nested-group remotes no longer share a state bucket, and checkpoints carry a credential-free project identity that /context-restore checks (#3003, reported by @tomg65). All six slug resolvers share one canonical-remote rule; the sticky cache is versioned so cache hits stay git-free.
+- The AskUserQuestion preference hook reads the same project identity as the writer, so never-ask preferences apply; unknown identity asks instead of auto-deciding (#2901). Idea first proposed in #2332 by @jawadakram20.
+- Brain context loaded 0 bytes in every skill because it called `gbrain list_pages`, an MCP tool name; it now uses `gbrain list` and reports failed queries (#2883). Includes #3000 by @TheAngryPit.
+- /sync-gbrain's code stage failed on managed gbrain (>= 0.51); it now passes `--no-pull` and never retries without it (#2985).
+- /sync-gbrain no longer re-creates duplicate curated pages; `--sources` selects memory types (#2922). Based on #2997 by @harshitgavita-07.
+- A clean Codex review could never pass the /codex gate. Untagged output is now UNVERIFIED instead of FAIL, and P2/P3-only output passes (#2769).
+- `/cso import-sarif` dropped every semgrep and trivy result that used `uriBaseId`; captured scanner shapes now import, and rejected results are counted with the rule and path (#3011).
+- The pre-push redact hook flagged the repo's own 4-part VERSION as a public IP on every /ship (#2856).
+- `gstack-update-check` cached "up to date" when it could not read the remote version; it now caches a short-lived CHECK_FAILED (#2786).
+
+#### Added
+- `SECURITY.md` with a private vulnerability reporting path (#2984).
+- Periodic drift canary that reads fresh journals from the pinned `claude` and fails if the guard stops recognizing them.
+
+#### Changed
+- `pr-title-sync.yml`, which runs with a write token on `pull_request_target`, pins `actions/checkout` to a reviewed SHA.
+
 ## [1.91.12.0] - 2026-10-01
 
 **Weekly evals finish in minutes, not hours, and a red now means something.**
