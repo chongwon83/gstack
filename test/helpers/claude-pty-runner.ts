@@ -8,7 +8,7 @@
  * Moved from the former 5,047-line claude-pty-runner.ts.
  */
 export { resolveClaudeBinary } from './pty/binary';
-export { stripAnsi, isRejectedSlashCommand, isPlanReadyVisible, isAutoDecidedVisible, extractPlanFilePath, planFileHasDecisionsSection, TAIL_SCAN_BYTES, isPermissionDialogVisible, stripPtyResidue, isNumberedOptionListVisible } from './pty/screen';
+export { stripAnsi, isRejectedSlashCommand, isPlanReadyVisible, isAutoDecidedVisible, extractPlanFilePath, planFileHasDecisionsSection, TAIL_SCAN_BYTES, isPermissionDialogVisible, stripPtyResidue, isNumberedOptionListVisible, API_ERROR_PANEL, idleTurnEnd } from './pty/screen';
 export { selectPtyNumberedOption, launchClaudePty } from './pty/launch';
 export type { ClaudePtyOptions, ClaudePtySession } from './pty/launch';
 export { runPtySession, realPtyDriver } from './pty/session';
@@ -24,7 +24,7 @@ export type { ReviewReportAtBottomResult, NativePlanTerminalReview, NativePlanTe
 export { ceoStep0Boundary, engSetupAUQ, engFirstReviewAUQ, engStep0Boundary, pickDesignFocusAll } from './pty/boundaries';
 export { runPlanSkillObservation } from './pty/runners/observation';
 export type { PlanSkillObservation, PlanSkillObservationOptions } from './pty/runners/observation';
-export { runPlanSkillCounting, countingCapture, isNativeCompletionSummary } from './pty/runners/counting';
-export type { PlanSkillCountObservation, PlanSkillCountingOptions, CountingRun } from './pty/runners/counting';
+export { runPlanSkillCounting, countingCapture, isNativeCompletionSummary, readEngTestPlans } from './pty/runners/counting';
+export type { EngTestPlan, PlanSkillCountObservation, PlanSkillCountingOptions, CountingRun } from './pty/runners/counting';
 export { planFloorDXPane, planFloorDXReplyInput, runPlanSkillFloorCheck } from './pty/runners/floor';
 export type { PlanSkillFloorObservation, PlanFloorDXReply } from './pty/runners/floor';

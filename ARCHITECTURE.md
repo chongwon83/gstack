@@ -490,18 +490,9 @@ The `parseNDJSON()` function is pure — no I/O, no side effects — making it i
   │
   │  ALL files in ~/.gstack-dev/
   │  Run dir: e2e-runs/{runId}/
-  │
-  │         eval-watch.ts
-  │              │
-  │        ┌─────┴─────┐
-  │     read HB     read partial
-  │        └─────┬─────┘
-  │              ▼
-  │        render dashboard
-  │        (stale >10min? warn)
 ```
 
-**Split ownership:** session-runner owns the heartbeat (current test state), eval-store owns partial results (completed test state). The watcher reads both. Neither component knows about the other — they share data only through the filesystem.
+**Split ownership:** session-runner owns the heartbeat (current test state), eval-store owns partial results (completed test state). Neither component knows about the other — they share data only through the filesystem. Sharded runs report live progress through the detach log (`~/.gstack-dev/eval-runs/`) and each shard's own eval directory.
 
 **Non-fatal everything:** All observability I/O is wrapped in try/catch. A write failure never causes a test to fail. The tests themselves are the source of truth; observability is best-effort.
 
@@ -532,7 +523,7 @@ See [eval defaults and overrides](CONTRIBUTING.md#testing--evals).
 
 Tier 1 runs on every `bun run test`. Tiers 2+3 are gated behind `EVALS=1`. The idea: catch 95% of issues for free, use LLMs only for judgment calls and integration testing.
 
-Anything that needs Aside itself — `test/skill-e2e-aside.test.ts`, the Aside cases in the qa and design-review E2E files, the live round-trip in `test/aside-render.test.ts` — runs only on a Mac with the Aside app open and self-skips elsewhere (`asideAvailable()` in `test/helpers/aside-available.ts`; `GSTACK_SKIP_ASIDE=1` forces the skip). The render gates are engine-agnostic: make-pdf's `*-gate.test.ts` and `test/skill-e2e-diagram.test.ts` run through whichever engine resolves (`browserAvailable()` in `make-pdf/test/e2e/browser-available.ts` = `asideAvailable() || resolveBrowseBin() !== null`) and skip only when neither exists, so Linux CI builds the browse binary with `bun run build:gates` and runs them live. The fallback engine's own tests (`browse/test/`, the `$B`-driven E2E cases) run on every platform as before: Linux CI proves the fallback path live and the Aside contract statically.
+Anything that needs Aside itself — `test/skill-e2e-aside.test.ts`, the Aside cases in the qa and design-review E2E files, the live round-trip in `test/aside-render.test.ts` — runs only on a Mac with the Aside app open and self-skips elsewhere (`asideAvailable()` in `test/helpers/aside-available.ts`; `GSTACK_SKIP_ASIDE=1` forces the skip). The render gates are engine-agnostic: make-pdf's `*-gate.test.ts` and `test/skill-e2e-diagram.test.ts` run through whichever engine resolves (`browserAvailable()` in `test/helpers/browser-available.ts` = `asideAvailable() || resolveBrowseBin() !== null`) and skip only when neither exists, so Linux CI builds the browse binary with `bun run build:gates` and runs them live. The fallback engine's own tests (`browse/test/`, the `$B`-driven E2E cases) run on every platform as before: Linux CI proves the fallback path live and the Aside contract statically.
 
 ## What's intentionally not here
 

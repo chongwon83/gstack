@@ -18,6 +18,7 @@ const PREPUSH = path.resolve(import.meta.dir, "..", "bin", "gstack-redact-prepus
 const REDACT = path.resolve(import.meta.dir, "..", "bin", "gstack-redact");
 
 let repo: string;
+let stateHome: string;
 
 function git(args: string[], cwd = repo): string {
   const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 30_000 });
@@ -73,6 +74,7 @@ const FAKE_AWS_KEY = ['AKIA', '1234567890ABCDEF'].join('');
 
 beforeEach(() => {
   repo = fs.mkdtempSync(path.join(os.tmpdir(), "prepush-"));
+  stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "prepush-state-"));
   git(["init", "-q", "-b", "main"]);
   git(["config", "user.email", "t@example.com"]);
   git(["config", "user.name", "T"]);
@@ -81,6 +83,7 @@ beforeEach(() => {
 
 afterEach(() => {
   fs.rmSync(repo, { recursive: true, force: true });
+  fs.rmSync(stateHome, { recursive: true, force: true });
 });
 
 describe("pre-push hook gating", () => {
@@ -114,6 +117,32 @@ describe("pre-push hook gating", () => {
 // literal for the repo's pre-push scan to warn about.
 const RELEASE = ["1", "84", "1", "0"].join(".");
 const PUBLIC_IP = ["8", "8", "8", "8"].join(".");
+
+describe("pushed diffs larger than the engine cap are scanned in chunks (#2915)", () => {
+  const commitLarge = (tail: string): { base: string; head: string } => {
+    const base = git(["rev-parse", "HEAD"]);
+    fs.writeFileSync(path.join(repo, "large-a.txt"), "clean-a ".repeat(90_000));
+    fs.writeFileSync(path.join(repo, "large-b.txt"), "clean-b ".repeat(90_000) + tail);
+    git(["add", "large-a.txt", "large-b.txt"]);
+    git(["commit", "-q", "-m", "large diff"]);
+    return { base, head: git(["rev-parse", "HEAD"]) };
+  };
+
+  test("a clean two-file diff over the cap passes without input_too_large", () => {
+    const { base, head } = commitLarge("");
+    const { code, stderr } = runHook(`refs/heads/main ${head} refs/heads/main ${base}\n`);
+    expect(code).toBe(0);
+    expect(stderr).not.toContain("engine.input_too_large");
+  });
+
+  test("a credential in a later file's chunk still blocks", () => {
+    const { base, head } = commitLarge("\n" + FAKE_AWS_KEY + "\n");
+    const { code, stderr } = runHook(`refs/heads/main ${head} refs/heads/main ${base}\n`);
+    expect(code).toBe(1);
+    expect(stderr).toContain("aws.access_key");
+    expect(stderr).not.toContain("engine.input_too_large");
+  });
+});
 
 describe("release version exemption (#2856)", () => {
   const mediums = (stderr: string): number => Number(/(\d+) MEDIUM finding/.exec(stderr)?.[1] ?? 0);
@@ -405,10 +434,11 @@ describe("install / chaining", () => {
       cwd: repo,
       input: Buffer.from(line),
       encoding: "utf8",
-      env: { ...process.env, GSTACK_REDACT_PREPUSH: "skip" },
+      env: { ...process.env, GSTACK_REDACT_PREPUSH: "skip", GSTACK_HOME: stateHome },
       timeout: 30_000,
     });
     expect(r.status).toBe(0);
+    expect(fs.readFileSync(path.join(stateHome, "security", "prepush-skip.jsonl"), "utf8")).toContain("env-skip");
     expect(fs.existsSync(seen)).toBe(true);
     expect(fs.readFileSync(seen, "utf8").trim()).toBe(
       `refs/heads/main ${sha} refs/heads/main ${ZERO}`,
@@ -428,7 +458,7 @@ describe("install / chaining", () => {
       cwd: repo,
       input: Buffer.from(`refs/heads/main ${"b".repeat(40)} refs/heads/main ${ZERO}\n`),
       encoding: "utf8",
-      env: { ...process.env, GSTACK_REDACT_PREPUSH: "skip" },
+      env: { ...process.env, GSTACK_REDACT_PREPUSH: "skip", GSTACK_HOME: stateHome },
       timeout: 30_000,
     });
     expect(r.status).toBe(1);
@@ -491,9 +521,10 @@ describe("install / chaining", () => {
       cwd: repo,
       input: Buffer.from(`refs/heads/main ${sha} refs/heads/main ${ZERO}\n`),
       encoding: "utf8",
-      env: { ...process.env, GSTACK_REDACT_PREPUSH: "skip" },
+      env: { ...process.env, GSTACK_REDACT_PREPUSH: "skip", GSTACK_HOME: stateHome },
     });
     expect(run.status).toBe(0);
+    expect(fs.readFileSync(path.join(stateHome, "security", "prepush-skip.jsonl"), "utf8")).toContain("env-skip");
     expect(fs.readFileSync(seen, "utf8").trim()).toBe("refs/heads/main");
   });
 
@@ -605,5 +636,29 @@ describe("diff-extraction bypasses (#2498, minimal reimplementation)", () => {
     const { code, stderr } = runHook(`refs/heads/feat not-a-sha\n`);
     expect(code).toBe(1);
     expect(stderr).toContain("could not parse");
+  });
+});
+
+describe("#3048: the pushed diff is scanned per file, so TS/JSX source syntax is not a secret", () => {
+  const mediums = (stderr: string): number => Number(/(\d+) MEDIUM finding/.exec(stderr)?.[1] ?? 0);
+  test("a TS parameter type and a JSX expression raise nothing; the same shape in YAML still does", () => {
+    const base = git(["rev-parse", "HEAD"]);
+    for (const [file, content] of [
+      ["src/coach.ts", "export function issue(\n  session: SessionState,\n): void {}\n"],
+      ["src/Turn.tsx", "<Row key={turn.requestId + turn.role} />\n"],
+    ] as const) {
+      fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
+      fs.writeFileSync(path.join(repo, file), content);
+      git(["add", file]);
+    }
+    git(["commit", "-q", "-m", "ts"]);
+    const tsHead = git(["rev-parse", "HEAD"]);
+    expect(mediums(runHook(`refs/heads/main ${tsHead} refs/heads/main ${base}\n`).stderr)).toBe(0);
+    fs.mkdirSync(path.join(repo, "deploy"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "deploy", "values.yaml"), "  session: SessionState,\n");
+    git(["add", "deploy/values.yaml"]);
+    git(["commit", "-q", "-m", "yaml"]);
+    const yamlHead = git(["rev-parse", "HEAD"]);
+    expect(mediums(runHook(`refs/heads/main ${yamlHead} refs/heads/main ${tsHead}\n`).stderr)).toBe(1);
   });
 });

@@ -24,7 +24,8 @@ export type ErrorCode =
   | 'CANCELLED'
   | 'PREREQUISITE'
   | 'INCOMPATIBLE_INPUT'
-  | 'ASSERTION_FAILED';
+  | 'ASSERTION_FAILED'
+  | 'PREPARED_EXPORT_REJECTED';
 export class CsoError extends Error {
   constructor(
     public code: ErrorCode,
@@ -184,7 +185,7 @@ export interface VerificationRequest {
   port: number;
   start: Command;
   legitimate: HttpAssertion[];
-  security: HttpAssertion;
+  security: HttpAssertion | HttpAssertion[];
   existingTests: Command[];
   fixtures: Record<string, string>;
   boundaryFiles: string[];
@@ -678,6 +679,22 @@ function assertion(value: unknown, name: string): HttpAssertion {
     ...(v.vulnerable === undefined ? {} : { vulnerable: oracle(object(v.vulnerable), `${name}.vulnerable`) }),
   };
 }
+export const MAX_SECURITY_ASSERTIONS = 8;
+export function securityAssertions(security: VerificationRequest['security']): HttpAssertion[] {
+  return Array.isArray(security) ? security : [security];
+}
+function securityAssertion(value: unknown): VerificationRequest['security'] {
+  if (!Array.isArray(value)) return assertion(value, 'security');
+  if (!value.length || value.length > MAX_SECURITY_ASSERTIONS)
+    throw new CsoError(
+      'INVALID_SCHEMA',
+      `security must be one assertion or 1..${MAX_SECURITY_ASSERTIONS} assertions`,
+    );
+  const assertions = value.map((x, i) => assertion(x, `security[${i}]`));
+  if (new Set(assertions.map((x) => x.name)).size !== assertions.length)
+    throw new CsoError('INVALID_SCHEMA', 'security assertion names must be distinct');
+  return assertions;
+}
 export function validateVerificationRequest(input: unknown): VerificationRequest {
   const v = object(input, 'verification request'),
     changes = v.changes,
@@ -729,7 +746,7 @@ export function validateVerificationRequest(input: unknown): VerificationRequest
     legitimate: (Array.isArray(v.legitimate) ? v.legitimate : []).map((x, i) =>
       assertion(x, `legitimate[${i}]`),
     ),
-    security: assertion(v.security, 'security'),
+    security: securityAssertion(v.security),
     existingTests: (Array.isArray(v.existingTests) ? v.existingTests : []).map((x, i) =>
       validateCommand(x, `existingTests[${i}]`),
     ),
@@ -770,7 +787,7 @@ export function validateVerificationRequest(input: unknown): VerificationRequest
     throw new CsoError('INVALID_SCHEMA', 'port must be 1024..65535');
   if (
     !request.legitimate.length ||
-    !request.security.vulnerable ||
+    securityAssertions(request.security).some((x) => !x.vulnerable) ||
     !request.existingTests.length ||
     !request.boundaryFiles.length ||
     !request.testFiles.length
@@ -779,17 +796,15 @@ export function validateVerificationRequest(input: unknown): VerificationRequest
       'INVALID_SCHEMA',
       'Verification needs a legitimate control, distinct before/fixed security oracles, existing tests, immutable test files, and boundary files',
     );
-  const secure = request.security.expected,
-    vulnerable = request.security.vulnerable;
-  const mutuallyExclusive =
-    secure.status !== vulnerable.status ||
+  const mutuallyExclusive = ({ expected: secure, vulnerable }: HttpAssertion) =>
+    secure.status !== vulnerable!.status ||
     (secure.includes !== undefined &&
-      vulnerable.excludes !== undefined &&
-      secure.includes.includes(vulnerable.excludes)) ||
-    (vulnerable.includes !== undefined &&
+      vulnerable!.excludes !== undefined &&
+      secure.includes.includes(vulnerable!.excludes)) ||
+    (vulnerable!.includes !== undefined &&
       secure.excludes !== undefined &&
-      vulnerable.includes.includes(secure.excludes));
-  if (!mutuallyExclusive)
+      vulnerable!.includes.includes(secure.excludes));
+  if (!securityAssertions(request.security).every(mutuallyExclusive))
     throw new CsoError(
       'INVALID_SCHEMA',
       'The vulnerable and fixed security oracles must be provably mutually exclusive',
@@ -883,12 +898,40 @@ export function renderReport(report: RunReportV3): string {
       : []),
   ];
   const model = report.application;
+  // Missing required coverage is stated before any finding text, so an audit
+  // that did not run (or ran partly) never reads as a clean result.
+  const domains = report.coverage.filter(
+      (c) => !c.domain.startsWith('scanner:') && c.status !== 'not_applicable',
+    ),
+    ran = domains.filter((c) => c.status === 'assessed' || c.status === 'partial'),
+    missing = domains.filter((c) => c.status !== 'assessed'),
+    reasons = [...new Set([...report.gaps, ...missing.flatMap((c) => c.gaps)])],
+    scannersWithoutResults = report.coverage.filter(
+      (c) => c.domain.startsWith('scanner:') && c.status !== 'assessed' && c.status !== 'not_applicable',
+    );
+  const status =
+    report.completeness === 'complete'
+      ? []
+      : [
+          report.completeness === 'not assessed'
+            ? 'Status: not assessed. No security domain was assessed, so this report is not a clean result.'
+            : 'Status: partial. Some required coverage is missing; findings below cover only the assessed part.',
+          `Ran: ${ran.length ? ran.map((c) => `${plain(c.domain)} (${plain(c.status)})`).join('; ') : 'nothing'}. Missing: ${missing.length ? missing.map((c) => `${plain(c.domain)} (${plain(c.status)})`).join('; ') : 'none'}.`,
+          `Reason: ${reasons.length ? list(reasons) : 'no assessment evidence was recorded for the missing domains'}.`,
+          `Next: ${report.status === 'finished' ? 'start a new /cso audit after resolving the reasons above; run `gstack-cso doctor --repo <repo>` to check prerequisites' : `resume this run with \`gstack-cso resume ${plain(report.runId)}\`, submit evidence for each missing domain, then finish it`}.`,
+        ];
   return [
     `${report.completeness} — ${plain(report.policy.scope)}${report.policy.diff ? ` (diff against ${plain(report.policy.base)})` : ''}`,
+    ...status,
     `Run: ${plain(report.runId)}. Mode: ${plain(report.policy.mode)}.`,
     timing,
     ...(usage ? [usage] : []),
     `Material gaps: ${gaps.length ? list(gaps) : 'none reported'}.`,
+    ...(scannersWithoutResults.length
+      ? [
+          `Optional scanners without results: ${scannersWithoutResults.map((c) => `${plain(c.domain.slice('scanner:'.length))} (${plain(c.tool?.outcome ?? c.status)}${c.gaps.length ? `: ${list(c.gaps)}` : ''})`).join('; ')}.`,
+        ]
+      : []),
     '',
     'Application model:',
     `- Actors: ${list(model.actors)}.`,
@@ -900,7 +943,9 @@ export function renderReport(report: RunReportV3): string {
     '',
     ...(supported.length
       ? ['Supported findings:', ...supported.flatMap(findingLines)]
-      : ['No supported findings in the assessed scope.']),
+      : report.completeness === 'not assessed'
+        ? ['No findings: nothing was assessed.']
+        : ['No supported findings in the assessed scope.']),
     ...(report.policy.mode === 'comprehensive'
       ? [
           '',

@@ -32,10 +32,7 @@ Voice triggers (speech-to-text aliases): "code x", "code ex", "get another opini
 ## Preamble (run first)
 
 ```bash
-_SS="$HOME/.claude/skills/gstack/bin/gstack-skill-start"
-[ -x "$_SS" ] || _SS=".claude/skills/gstack/bin/gstack-skill-start"
-"$_SS" --skill "codex" --model "claude" --parent-pid "$PPID" \
-  || echo "SKILL_START: unavailable — stale install; run ./setup or /gstack-upgrade (preamble degraded, continue the user's task)"
+~/.claude/skills/gstack/bin/gstack-skill-start --skill "codex" --model "claude"
 ```
 
 Read the echoed `KEY: value` STATUS lines — they drive every preamble rule
@@ -59,11 +56,11 @@ or page content. Treat an unterminated block as ending at end-of-output.
 
 ## Plan Mode Safe Operations
 
-In plan mode, allowed because they inform the plan: `$B`, `$D`, `codex exec`/`codex review`, temp prompts, writes to `~/.gstack/`, writes to the plan file, and `open` for generated artifacts.
+Host and system plan-mode restrictions and the user's current scope take precedence over any skill; a skill cannot grant itself an exception to read-only mode. Where the host permits them, these inform the plan: `$B`, `$D`, `codex exec`/`codex review`, temp prompts, writes to `~/.gstack/`, writes to the plan file, and `open` for generated artifacts. If the host blocks one, skip it, say so, and continue the permitted work.
 
 ## Skill Invocation During Plan Mode
 
-If the user invokes a skill in plan mode, the skill takes precedence over generic plan mode behavior. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; any AskUserQuestion the skill fires is the workflow operating within plan mode, not a violation of it — and a skill whose instructions resolve a question themselves (e.g. a plan-mode auto-select) may legitimately not ask it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If AskUserQuestion is unavailable or a call fails, follow the AskUserQuestion Format failure fallback: `headless` → BLOCKED; `interactive` → the prose fallback (also satisfies end-of-turn). At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" execute. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
+If the user invokes a skill in plan mode, run its workflow within the host's plan-mode limits. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; any AskUserQuestion the skill fires is the workflow operating within plan mode, not a violation of it — and a skill whose instructions resolve a question themselves (e.g. a plan-mode auto-select) may legitimately not ask it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If AskUserQuestion is unavailable or a call fails, follow the AskUserQuestion Format failure fallback: `headless` → BLOCKED; `interactive` → the prose fallback (also satisfies end-of-turn). At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" run only where the host permits them. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
 
 If `PROACTIVE` is `false`, do not auto-invoke or suggest skills, including by asking whether to run one. Only run skills the user explicitly invokes.
 
@@ -238,30 +235,7 @@ Bad closer: a tour of every edit, a restatement of the plan, and three paragraph
 At session start or after compaction, recover recent project context.
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
-_BRANCH=$(git branch --show-current 2>/dev/null | tr -cd 'a-zA-Z0-9._/-') || :; _BRANCH=${_BRANCH:-unknown}
-eval "$(~/.claude/skills/gstack/bin/gstack-paths)"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
-_PROJ="$GSTACK_STATE_ROOT/projects/${SLUG:-unknown}"
-if [ -d "$_PROJ" ]; then
-  echo "--- RECENT ARTIFACTS ---"
-  find "$_PROJ/ceo-plans" "$_PROJ/checkpoints" -type f -name "*.md" 2>/dev/null | xargs -r ls -t 2>/dev/null | head -3
-  [ -f "$_PROJ/${BRANCH:-unknown}-reviews.jsonl" ] && echo "REVIEWS: $(wc -l < "$_PROJ/${BRANCH:-unknown}-reviews.jsonl" | tr -d ' ') entries"
-  [ -f "$_PROJ/timeline.jsonl" ] && tail -5 "$_PROJ/timeline.jsonl"
-  if [ -f "$_PROJ/timeline.jsonl" ]; then
-    _LAST=$(grep "\"branch\":\"${_BRANCH}\"" "$_PROJ/timeline.jsonl" 2>/dev/null | grep '"event":"completed"' | tail -1)
-    [ -n "$_LAST" ] && echo "LAST_SESSION: $_LAST"
-    _RECENT_SKILLS=$(grep "\"branch\":\"${_BRANCH}\"" "$_PROJ/timeline.jsonl" 2>/dev/null | grep '"event":"completed"' | tail -3 | grep -o '"skill":"[^"]*"' | sed 's/"skill":"//;s/"//' | tr '\n' ',')
-    [ -n "$_RECENT_SKILLS" ] && echo "RECENT_PATTERN: $_RECENT_SKILLS"
-  fi
-  _LATEST_CP=$(find "$_PROJ/checkpoints" -name "*.md" -type f 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1)
-  [ -n "$_LATEST_CP" ] && echo "LATEST_CHECKPOINT: $_LATEST_CP"
-  if [ -f "$_PROJ/decisions.active.json" ]; then
-    echo "--- ACTIVE DECISIONS (recent, scope-relevant) ---"
-    ~/.claude/skills/gstack/bin/gstack-decision-search --recent 5 2>/dev/null
-    echo "--- END DECISIONS ---"
-  fi
-  echo "--- END ARTIFACTS ---"
-fi
+~/.claude/skills/gstack/bin/gstack-context-recovery
 ```
 
 If artifacts are listed, read the newest useful one. If `LAST_SESSION` or `LATEST_CHECKPOINT` appears, give a 2-sentence welcome back summary. If `RECENT_PATTERN` clearly implies a next skill, suggest it once.
@@ -312,7 +286,7 @@ Before each decision brief (AskUserQuestion or Conductor/fallback prose), choose
 
 After answer, log best-effort (PostToolUse hook also captures deterministically when installed; dedup on (source, tool_use_id) handles double-writes). Substitute `SESSION_ID` with the value the preamble's skill-start output echoed — shell variables do not survive between Bash calls:
 ```bash
-~/.claude/skills/gstack/bin/gstack-question-log '{"skill":"codex","question_id":"<id>","question_summary":"<short>","category":"<approval|clarification|routing|cherry-pick|feedback-loop>","door_type":"<one-way|two-way>","options_count":N,"user_choice":"<key>","recommended":"<key>","session_id":"SESSION_ID"}' 2>/dev/null || true
+~/.claude/skills/gstack/bin/gstack-question-log '{"skill":"codex","question_id":"<id>","question_summary":"<summary-slug>","category":"<approval|clarification|routing|cherry-pick|feedback-loop>","door_type":"<one-way|two-way>","options_count":N,"user_choice":"<key>","recommended":"<key>","session_id":"SESSION_ID"}' 2>/dev/null || true
 ```
 
 For two-way questions, offer: "Tune this question? Reply `tune: never-ask`, `tune: always-ask`, or free-form."
@@ -321,7 +295,7 @@ User-origin gate (profile-poisoning defense): write tune events ONLY when `tune:
 
 Write (only after confirmation for free-form):
 ```bash
-~/.claude/skills/gstack/bin/gstack-question-preference --write '{"question_id":"<id>","preference":"<pref>","source":"inline-user","free_text":"<optional original words>"}'
+~/.claude/skills/gstack/bin/gstack-question-preference --write '{"question_id":"<id>","preference":"<pref>","source":"inline-user"}'
 ```
 
 Exit code 2 = rejected as not user-originated; do not retry. On success: "Set `<id>` → `<preference>`. Active immediately."
@@ -351,8 +325,9 @@ Then build the complete version of what remains.
 
 **Eureka:** When first-principles reasoning contradicts conventional wisdom, name it and log:
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-paths)"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
-jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg skill "SKILL_NAME" --arg branch "$(git branch --show-current 2>/dev/null)" --arg insight "ONE_LINE_SUMMARY" '{ts:$ts,skill:$skill,branch:$branch,insight:$insight}' >> "$GSTACK_STATE_ROOT/analytics/eureka.jsonl" 2>/dev/null || true
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+BRANCH=$(~/.claude/skills/gstack/bin/gstack-slug --get BRANCH 2>/dev/null)
+jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg skill "SKILL_NAME" --arg branch "$BRANCH" --arg insight "ONE_LINE_SUMMARY" '{ts:$ts,skill:$skill,branch:$branch,insight:$insight}' >> "$GSTACK_STATE_ROOT/analytics/eureka.jsonl" 2>/dev/null || true
 ```
 
 ## Completion Status Protocol
@@ -492,13 +467,16 @@ can actually USE gstack's selected model, AND the installed CLI version isn't in
 known-bad list. Sourcing `gstack-codex-probe` loads the shared helpers that both
 `/codex` and `/autoplan` use.
 
-If the user names a model for this request, set `GSTACK_CODEX_MODEL` to that model
-before this probe and use it for every invocation in the request. The probe must
-check the requested model, including when the frontier default is unavailable.
+Model order: a model the user names for this request, `GSTACK_CODEX_MODEL`, Codex
+`config.toml` `model` (`review_model` first for `codex review`; honors `$CODEX_HOME`),
+then `gpt-6-astra`. Each call prints `CODEX_MODEL: <model> (<kind>; source: ...)` first.
+For a named model, pass it as the second argument of every `_gstack_codex_select_model`
+call, and run `_gstack_codex_select_model exec '<model>'` before the probe below. An
+invalid or unavailable choice stops with a repair message, never the default.
 
 ```bash
 _TEL=$(~/.claude/skills/gstack/bin/gstack-config get telemetry 2>/dev/null || echo off)
-source ~/.claude/skills/gstack/bin/gstack-codex-probe
+source ~/.claude/skills/gstack/bin/gstack-codex-probe || { echo "HELPER_UNAVAILABLE"; exit 1; }
 
 # GSTACK_ACTIVE_HOST names the harness, never the model.
 if { [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_SANDBOX:-}" ] || [ "${GSTACK_ACTIVE_HOST:-}" = codex ]; }; then
@@ -513,26 +491,45 @@ fi
 if ! _gstack_codex_auth_probe >/dev/null; then
   _gstack_codex_log_event "codex_auth_failed"
   echo "AUTH_FAILED"
-else
-  _gstack_codex_model_probe   # ~10s round trip on first run, cached 1h (#2477)
+elif _gstack_codex_sandbox_preflight; then   # free; Linux only
+  _gstack_codex_model_probe   # ~10s round trip on first run, cached 1h
 fi
 _gstack_codex_version_check   # warns if known-bad, non-blocking
 ```
 
 If the runtime guard reports a harness mismatch, stop. Outside coverage is unavailable. Repair with `./setup --host codex`; do not silently substitute another provider or force a same-harness invocation.
 
+If the output contains `HELPER_UNAVAILABLE`, stop: the gstack helper could not load in
+this shell. Relay its `gstack: cannot locate ...` line verbatim; it names the shell and
+links the fix.
+
 If the output contains `AUTH_FAILED`, stop and tell the user:
 "No Codex authentication found. Run `codex login` or set `$CODEX_API_KEY` / `$OPENAI_API_KEY`, then re-run this skill."
 
-If the output contains `MODEL_UNUSABLE`, stop — auth exists but the account
-cannot use gstack's selected model (`GSTACK_CODEX_MODEL` or the `gpt-6-astra`
-default). Relay the probe's HINT lines and
-follow the "Model not supported (HTTP 400)" recovery steps in
+If the output contains `MODEL_UNUSABLE`, stop — the selected model (named with its
+source on the `CODEX_MODEL:` line) is invalid or the account cannot use it. Relay the
+probe's HINT lines and
+follow the "Model not supported (HTTP 400 or 404)" recovery steps in
 `## Error Handling` below. Running the modes anyway just burns four
-invocations on the same 400 (#2477).
+invocations on the same 400.
 
-`MODEL_PROBE_INCONCLUSIVE` is non-blocking (timeout/transient network): pass
-the warning through and continue.
+If the output contains `MODEL_QUOTA_EXHAUSTED`, stop: the account hit its Codex
+usage limit. Relay Codex's own line under the marker verbatim (it names the reset
+time) and the HINT line (how long gstack skips Codex, and how to retry now); the model
+is fine, so do not change it. Running the modes anyway fails the same way.
+
+`MODEL_PROBE_RATE_LIMITED` is non-blocking: Codex answered 429. Report
+`CODEX_MODE: unverified (rate_limited)`, relay Codex's line and continue; a
+rate-limited mode run is missing coverage, never a pass.
+
+If the output contains `CODEX_SANDBOX: unavailable`, stop: Codex's sandbox cannot
+start here, so every command it runs would fail and its review would read nothing.
+Relay the `Codex outside review unavailable: ...` line verbatim, including its fix.
+No paid call was made.
+
+`MODEL_PROBE_INCONCLUSIVE` is non-blocking (timeout/transient network): report
+`CODEX_MODE: unverified`, pass the warning through and continue; the mode's own
+validator still decides the result.
 
 If the version check printed a `WARN:` line, pass it through to the user verbatim
 (non-blocking — Codex may still work, but the user should upgrade).
@@ -552,7 +549,9 @@ This keeps the skill working whether installed as a Claude Code plugin
 container where `HOME` may be unset and `/tmp` may be read-only.
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-paths)"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+PLAN_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get PLAN_ROOT)
+TMP_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get TMP_ROOT)
 ```
 
 After this, every subsequent bash block in this skill uses `"$PLAN_ROOT"` and
@@ -607,8 +606,8 @@ Every prompt sent to Codex MUST be prefixed with this boundary instruction:
 
 This applies to Challenge mode (prompt) and Consult mode (persona prompt), and to the
 custom-instructions path of Review mode — all three use `codex exec`, which still takes
-a free-form prompt argument. It does **not** apply to the default scoped `codex review`
-call in Step 2A: that command is invoked with **no prompt argument at all** (see "Scope
+a free-form prompt (fed on stdin with `codex exec -`, so size and quoting never break it). It does **not** apply to the default scoped `codex review`
+call in Step 2A: that command is invoked with **no prompt at all** (see "Scope
 flags exclude the prompt argument" in the Review mode section), so there is nowhere to put the preamble. That
 is acceptable — `codex review --base` hands the model a pre-computed diff rather than
 turning it loose on the filesystem, so the rabbit-hole risk the boundary guards against
@@ -775,12 +774,10 @@ table-bearing section that must be the file's terminal heading.
 
 ## Model & Reasoning
 
-**Model:** gstack defaults Codex invocations to the current frontier agentic coding
-model via `-c "model=\"${GSTACK_CODEX_MODEL:-gpt-6-astra}\""` (currently `gpt-6-astra`). A user can override
-the default for a shell with `GSTACK_CODEX_MODEL=<model>`, or for one request by naming a
-model in the `/codex` prompt.
-Native `codex review` also sets `review_model` to the selected model so a separate
-review pin in the CLI config cannot override the request.
+**Model:** every Codex call passes the selection above via `-c "model=\"${_GSTACK_CODEX_SEL:?}\"" -c skills.include_instructions=false`.
+Native `codex review` selects with `review` and sets both `model` and `review_model`. The
+flag also keeps installed skills out of Codex's context, so a review cannot become a
+nested skill run.
 
 **Reasoning effort: `xhigh` for all three modes** (set 2026-09-05 at owner request;
 previously Review/Challenge `high`, Consult `medium`).
@@ -831,7 +828,7 @@ If token count is not available, display: `Tokens: unknown`
   the wrapper's exit-124 path normally fires first with its explicit message. If the Bash
   call itself times out anyway (wrapper unavailable AND codex hung), tell the user:
   "Codex timed out. The prompt may be too large or the API may be slow. Try again or use a smaller scope."
-- **Timeout (inner `timeout` wrapper, exit 124):** If the shell `timeout 540` wrapper fires first, the skill's hang-detection block auto-logs a telemetry event + operational learning and prints: "Codex stalled past 9 minutes. Common causes: model API stall, long prompt, network issue. Try re-running. If persistent, split the prompt or check `~/.codex/logs/`." No extra action needed.
+- **Timeout (inner `timeout` wrapper, exit 124):** If the wrapper fires first (it TERMs Codex, then KILLs it after 10s), the skill's hang-detection block auto-logs a telemetry event + operational learning and prints: "Codex stalled past 9 minutes. Common causes: model API stall, long prompt, network issue. Try re-running. If persistent, split the prompt or check `~/.codex/logs/`." No extra action needed.
 - **`the argument '[PROMPT]' cannot be used with '--base <BRANCH>'`:** a prompt argument
   leaked into a scoped `codex review`. This fails instantly, before any API call, so it
   looks like a hang-free "no output" — do not misread it as a model stall. Drop the
@@ -844,18 +841,24 @@ If token count is not available, display: `Tokens: unknown`
   missing or wrong. A prompt-only `codex review` defaults to uncommitted changes, so a
   clean working tree reads as an empty review even when `<base>...HEAD` is large. Confirm
   `--base <base>` is actually on the command line.
-- **Model not supported (HTTP 400):** stderr shows
+- **Model not supported (HTTP 400 or 404):** stderr shows
   `The '<model>' model is not supported when using Codex with a ChatGPT account`
-  (a `status: 400` / `invalid_request_error` naming a model). This is a
-  model-entitlement problem, not an auth or network failure, and the auth probe
-  cannot catch it. Recovery, in order:
-  1. Check whether `GSTACK_CODEX_MODEL` is set. If so, update it to a model the
-     account can use.
-  2. If no override is set, gstack defaults to `gpt-6-astra`. If the account cannot
-     use it yet, set `GSTACK_CODEX_MODEL=<supported-model>` or replace the default
-     flag with `-c "model=\"<supported-model>\""`.
+  (a `status: 400` / `invalid_request_error` naming a model), or
+  `404 Not Found: The model '<model>' does not exist or you do not have access to it`
+  (a retired model; a bare 404 usually means a custom provider's `base_url` is wrong).
+  `requires a newer version of Codex` means the CLI is too old: upgrade it instead.
+  None of these is an auth or network failure, and the auth probe cannot catch them.
+  Recovery, in order:
+  1. Read the `CODEX_MODEL:` line: it names the model and where it came from.
+  2. Fix that source: name another model for this request, update
+     `GSTACK_CODEX_MODEL`, or change `model` (or `review_model`) in the Codex
+     `config.toml`. With none of these set, gstack uses `gpt-6-astra`; set any of
+     them to a model the account can use.
   3. If Codex printed `[notice.model_migrations]`, use that replacement model.
   Never present this as a model stall or a PASS — it is a fail-closed gate result.
+- **`VERDICT: unavailable`:** the shared validator found the run did not execute (for
+  example `Codex's sandbox could not start here`). Relay its line and fix verbatim; it is
+  missing coverage, never a PASS. Details: `docs/troubleshooting.md` in the gstack checkout.
 - **Empty response:** If `$TMPRESP` is empty or doesn't exist, tell the user:
   "Codex returned no response. Check stderr for errors."
 - **Session resume failure:** If resume fails, delete the session file and start fresh.
@@ -864,7 +867,8 @@ If token count is not available, display: `Tokens: unknown`
 
 ## Important Rules
 
-- **Never modify files.** This skill is read-only. Codex runs in read-only sandbox mode.
+- **Never modify files.** This skill is read-only. Codex runs in read-only sandbox mode
+  (full access only when the user exported `GSTACK_CODEX_NO_SANDBOX=1`; it warns on every use).
 - **Present output verbatim.** Do not truncate, summarize, or editorialize Codex's output
   before showing it. Show it in full inside the CODEX SAYS block.
 - **Add synthesis after, not instead of.** Any Claude commentary comes after the full output.

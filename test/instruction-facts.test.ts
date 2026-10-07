@@ -61,12 +61,11 @@ describe('CLAUDE.md facts match the code that owns them', () => {
     expect(claimed, `CLAUDE.md:${lineOf(claudeMd, at)} says ${claimed}, test/catalog-budget.test.ts says ${value}; fix: update CLAUDE.md to ${value.toLocaleString('en-US')}`).toBe(value);
   });
 
-  test('CLAUDE.md points at package.json for detach timeouts instead of stating numbers', () => {
+  test('CLAUDE.md points at scripts/eval-bg.ts for detach caps instead of stating numbers', () => {
     const scripts = JSON.parse(read('package.json')).scripts as Record<string, string>;
     const timeouts = Object.entries(scripts)
       .filter(([name, command]) => name.startsWith('eval:bg') && /--timeout \d+/.test(command))
       .map(([name, command]) => ({ name, seconds: /--timeout (\d+)/.exec(command)![1]! }));
-    expect(timeouts.map(t => t.name)).toEqual(expect.arrayContaining(['eval:bg:gate', 'eval:bg:periodic']));
     for (const { name, seconds } of timeouts) {
       for (const spelled of [seconds, Number(seconds).toLocaleString('en-US')]) {
         const at = claudeMd.indexOf(spelled);
@@ -76,10 +75,10 @@ describe('CLAUDE.md facts match the code that owns them', () => {
     const start = claudeMd.indexOf('## Running evals as an agent');
     expect(start).toBeGreaterThanOrEqual(0);
     const section = claudeMd.slice(start, claudeMd.indexOf('\n## ', start + 1));
-    expect(section).toContain("package.json's `eval:bg:gate` / `eval:bg:periodic`");
+    expect(section, 'CLAUDE.md "Running evals as an agent" no longer names scripts/eval-bg.ts, which computes the detach caps; fix: name it in that section').toContain('scripts/eval-bg.ts');
     const stale = /--timeout \d+|\b\d[\d,]{3,}\s*(?:s|sec|seconds)\b/.exec(section);
     expect(stale?.[0] ?? null,
-      `CLAUDE.md:${stale ? lineOf(claudeMd, start + stale.index) : '?'} states a timeout number in the detach section; package.json owns it; fix: remove the number`).toBeNull();
+      `CLAUDE.md:${stale ? lineOf(claudeMd, start + stale.index) : '?'} states a timeout number in the detach section; scripts/eval-bg.ts computes it; fix: remove the number`).toBeNull();
   });
 });
 
@@ -169,10 +168,8 @@ const RATCHET_ALLOWLIST = JSON.parse(read('test/state-root-ratchet.allowlist.jso
 const readinessEvalReason = RATCHET_ALLOWLIST.find(entry => entry.path === 'land-and-deploy/sections/readiness-gate.md.tmpl')!.reason;
 const DESCRIPTION = 'user-facing description of where the data lives; no command reads or writes this literal';
 const SOURCE_COMMENT = 'source comment, not rendered into any skill';
-const DESIGN_DOC_HELD = 'held at the literal path: converting design-doc discovery to $GSTACK_STATE_ROOT made plan-eng-review ask its scope gate in prose instead of AskUserQuestion (plan-mode no-op eval: 5 of 5 runs failed with it, 6 of 6 passed without); see TODOS.md';
 
 const STATE_ROOT_ALLOWLIST: Array<{ file: string; match: string; reason: string }> = [
-  { file: 'autoplan/SKILL.md.tmpl', match: 'ls -t ~/.gstack/projects/$SLUG/*-design-*.md', reason: DESIGN_DOC_HELD },
   { file: 'autoplan/SKILL.md.tmpl', match: 'test plan on disk at ~/.gstack/projects/$SLUG/', reason: DESCRIPTION },
   { file: 'careful/SKILL.md.tmpl', match: '`~/.gstack/projects/<slug>/careful-patterns.txt` (per-project)', reason: DESCRIPTION },
   { file: 'design-shotgun/SKILL.md.tmpl', match: 'v1 schema at `~/.gstack/projects/$SLUG/taste-profile.json`', reason: DESCRIPTION },
@@ -183,9 +180,6 @@ const STATE_ROOT_ALLOWLIST: Array<{ file: string; match: string; reason: string 
   { file: 'plan-ceo-review/sections/review-sections.md.tmpl', match: 'Keep in `~/.gstack/projects/` only (local, personal reference)', reason: DESCRIPTION },
   { file: 'plan-tune/SKILL.md.tmpl', match: 'Logs stay local (`~/.gstack/projects/<slug>/question-log.jsonl`)', reason: DESCRIPTION },
   { file: 'plan-tune/SKILL.md.tmpl', match: '`~/.gstack/projects/<slug>/question-log.jsonl` — nothing leaves your', reason: DESCRIPTION },
-  { file: 'scripts/resolvers/design-doc-discovery.ts', match: '* under ~/.gstack/projects/<slug>/, falling back', reason: SOURCE_COMMENT },
-  { file: 'scripts/resolvers/design-doc-discovery.ts', match: '_LOCALDOC=$(ls -t ~/.gstack/projects/$SLUG/*-$BRANCH-design-*.md', reason: DESIGN_DOC_HELD },
-  { file: 'scripts/resolvers/design-doc-discovery.ts', match: '_LOCALDOC=$(ls -t ~/.gstack/projects/$SLUG/*-design-*.md', reason: DESIGN_DOC_HELD },
   { file: 'scripts/resolvers/learnings.ts', match: '* Learnings are stored per-project at ~/.gstack/projects/{slug}/learnings.jsonl', reason: SOURCE_COMMENT },
   { file: 'scripts/resolvers/preamble.ts', match: 'local JSONL append to ~/.gstack/analytics/ (inline, inspectable)', reason: SOURCE_COMMENT },
 ];

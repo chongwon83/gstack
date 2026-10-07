@@ -326,9 +326,9 @@ function sharedCurlRequest(args: string[]) {
   else {
     try {
       const url = new URL(urls[0]);
-      const repoPath = /^\/repos\/fixture\/shared-libs(?:\/(?:contents\/.+|pulls(?:\/\d+(?:\/files)?)?|commits(?:\/(?:[a-f0-9]{40}|main))?|branches\/[^/]+))?$/;
+      const repoPath = /^\/repos\/fixture\/shared-libs(?:\/(?:contents\/.+|pulls(?:\/\d+(?:\/files)?)?|commits(?:\/(?:[a-f0-9]{40}|main))?|branches(?:\/[^/]+)?))?$/;
       if (url.protocol !== 'https:' || url.hostname !== 'api.github.com' || url.port || url.username || url.password || url.hash ||
-        (!repoPath.test(url.pathname) && url.pathname !== '/search/issues')) throw new Error('unsupported URL');
+        (!repoPath.test(url.pathname) && !['/search/issues', '/rate_limit'].includes(url.pathname))) throw new Error('unsupported URL');
       result.endpoint = url.pathname.slice(1) + url.search;
     } catch { result.violations.push('unsupported curl URL: fixture GitHub GET endpoints only'); }
   }
@@ -685,6 +685,7 @@ else if(/\\/pulls\\/42(?:\\?|$)/.test(endpoint))out=pr(42,old);
 else if(/\\/pulls\\/\\d+(?:\\?|$)/.test(endpoint)){const row=prTable.find(row=>row.number===Number(endpoint.match(/\\/pulls\\/(\\d+)/)[1]));if(!row)apiError(404,'Not Found');out=toPr(row);}
 else if(endpoint.includes('/commits')){const isPrCommit=prHead!==${JSON.stringify(f.tip)}&&endpoint.includes(prHead);out=endpoint.includes('/commits/')?{sha:isPrCommit?prHead:${JSON.stringify(f.tip)},commit:{committer:{date:isPrCommit?old:now},message:'Fixture work'},files:Object.keys(isPrCommit?prFiles:files).map(filename=>({filename,status:'modified'}))}:[{sha:${JSON.stringify(f.tip)},commit:{committer:{date:now},message:'Fixture work'}}];}
 else if(endpoint.includes('/branches/'))out={name:'main',commit:{sha:${JSON.stringify(f.tip)}}};
+else if(/\\/branches(?:\\?|$)/.test(endpoint))out=[{name:'main',commit:{sha:${JSON.stringify(f.tip)}},protected:false}];
 else if(/^\\/?repos\\/fixture\\/shared-libs\\/?(?:\\?|$)/.test(endpoint))out={default_branch:'main',full_name:'fixture/shared-libs',html_url:'https://github.com/fixture/shared-libs'};
 else apiError(404,'Not Found');
 if(curl)curlResponse(out);
@@ -1227,6 +1228,7 @@ export async function runSharedInteractive(f: SharedLibsFixture, testName: strin
   let timer: ReturnType<typeof setTimeout> | undefined;
   let actorFailure: Error | undefined;
   let captureStartedAt = 0;
+  let armedMs: number | undefined;
   const streamed: any[] = [];
   const diagnosticDirectory = path.join(SHARED_LIBS_ROOT, '.context/shared-libs-captures');
   const diagnostic = path.join(diagnosticDirectory, `${Date.now()}-${testName}-${path.basename(f.root)}.jsonl`);
@@ -1239,7 +1241,7 @@ export async function runSharedInteractive(f: SharedLibsFixture, testName: strin
       userPrompt: prompt, workingDirectory: f.repo, testName, env: f.env,
       pathToClaudeCodeExecutable: claudeBinary,
       settingSources: [], maxTurns: SHARED_INTERACTIVE_MAX_TURNS, maxRetries: 0,
-      signal: fixtureOptions.attempt.signal,
+      signal: fixtureOptions.attempt.signal, sessionBudgetMs: () => armedMs, streamLiveness: true,
       allowedTools: ['Read', 'Bash', 'Write', 'Edit', 'Glob', 'Grep', 'AskUserQuestion'],
       queryProvider: args => {
         fixtureOptions.attempt.signal.throwIfAborted();
@@ -1247,7 +1249,8 @@ export async function runSharedInteractive(f: SharedLibsFixture, testName: strin
         if (remaining <= 0) throw new Error('Shared capture attempt expired before admission');
         abortController = args.options?.abortController;
         if (!abortController) throw new Error('SDK capture lacks its owned abort controller');
-        timer = setTimeout(() => abortController!.abort(), Math.min(CAPTURE_MS, remaining));
+        armedMs = Math.min(CAPTURE_MS, remaining);
+        timer = setTimeout(() => abortController!.abort(), armedMs);
         captureStartedAt = Date.now();
         fs.mkdirSync(diagnosticDirectory, { recursive: true });
         const source = query({ ...args, options: { ...args.options,
@@ -1256,8 +1259,11 @@ export async function runSharedInteractive(f: SharedLibsFixture, testName: strin
           get(target, key) {
             if (key === Symbol.asyncIterator) return async function* () {
               for await (const event of target) {
-                streamed.push(event);
-                fs.appendFileSync(diagnostic, JSON.stringify(event) + '\n');
+                // Partial-message rows feed the runner's liveness summary only.
+                if (event.type !== 'stream_event') {
+                  streamed.push(event);
+                  fs.appendFileSync(diagnostic, JSON.stringify(event) + '\n');
+                }
                 yield event;
               }
             };

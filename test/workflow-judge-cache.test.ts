@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Messages } from '@anthropic-ai/sdk/resources/messages';
-import { callJudge, JudgeRefusalError, DEFAULT_JUDGE_MAX_TOKENS, judgePanel, judgePanelMajority, judgePanelMean, judgePanelReasoning, JUDGE_SCORE_DIMENSIONS, JUDGE_PANEL_SAMPLES } from './helpers/llm-judge';
+import { callJudge, JudgeRefusalError, DEFAULT_JUDGE_MAX_TOKENS, judgePanel, judgePanelMajority, judgePanelMean, judgePanelMedian, judgePanelReasoning, JUDGE_SCORE_DIMENSIONS, JUDGE_PANEL_SAMPLES } from './helpers/llm-judge';
 import { EVAL_POLICY } from './helpers/periodic-exclude-data';
 import { getCookieWorkflowManualReview } from './helpers/cookie-workflow-manual-review';
 import { resolveEvalModel } from '../lib/eval-model';
@@ -172,7 +172,7 @@ test('workflow registration preserves model work and reserves only terminal-reco
   const body = source.split('async function runWorkflowJudge')[1]!.split('// Block 1:')[0]!;
   const stages = ['workflowJudgeAttempts.set', 'readWorkflowJudgeInput(', 'cache.lookup()',
     'judgePanel(() => callJudge<JudgeScore>(prompt, opts.model, { signal: controller.signal, max_tokens: maxTokens,',
-    'scores = judgePanelMean(samples, JUDGE_SCORE_DIMENSIONS);',
+    'scores = judgePanelMedian(samples, JUDGE_SCORE_DIMENSIONS);',
     'expect(scores.clarity)', 'expect(scores.completeness)', 'expect(scores.actionability)', 'cache.publish(samples, active)']
     .map(stage => body.indexOf(stage));
   expect(stages.every(position => position >= 0)).toBe(true);
@@ -207,7 +207,7 @@ function actualCallback(f: ReturnType<typeof fixture>, overrides: {
     'evalCollector', 'expect', 'console', 'performance', 'JUDGE_MS', 'WORKFLOW_JUDGE_RECORD_MS',
     'setTimeout', 'clearTimeout', 'JudgeRefusalError', 'getCookieWorkflowManualReview', 'DEFAULT_JUDGE_MAX_TOKENS', 'resolveEvalModel',
     'WORKFLOW_JUDGE_RESPONSE_SCHEMA', 'validWorkflowJudgeScore',
-    'judgePanel', 'judgePanelMean', 'judgePanelReasoning', 'JUDGE_SCORE_DIMENSIONS',
+    'judgePanel', 'judgePanelMean', 'judgePanelMedian', 'judgePanelReasoning', 'JUDGE_SCORE_DIMENSIONS',
     `${javascript}\nreturn runWorkflowJudge;`)(
     f.root, overrides.read ?? readWorkflowJudgeInput, buildWorkflowJudgePrompt,
     (options: WorkflowCacheOptions) => (overrides.prepare ?? prepareWorkflowJudgeCache)({ ...options, env: f.env }),
@@ -219,7 +219,7 @@ function actualCallback(f: ReturnType<typeof fixture>, overrides: {
     overrides.setTimer ?? setTimeout, overrides.clearTimer ?? clearTimeout,
     JudgeRefusalError, getCookieWorkflowManualReview, DEFAULT_JUDGE_MAX_TOKENS, resolveEvalModel,
     WORKFLOW_JUDGE_RESPONSE_SCHEMA, validWorkflowJudgeScore,
-    judgePanel, judgePanelMean, judgePanelReasoning, JUDGE_SCORE_DIMENSIONS);
+    judgePanel, judgePanelMean, judgePanelMedian, judgePanelReasoning, JUDGE_SCORE_DIMENSIONS);
   return { run, records, signals, prompts, attempts, options: { ...f.opts, suite: 'Cache regression' } };
 }
 
@@ -394,21 +394,28 @@ test('Ship sends its authorized 64k cap and compact response contract through th
   const registration = source.match(/testIfSelected\('ship\/SKILL\.md workflow',[\s\S]*?await runWorkflowJudge\(\{([\s\S]*?)\n    \}\);/);
   expect(registration).not.toBeNull();
   const options = new Function('QA_DISCOVERY_REFERENCES', `return ({${registration![1]}});`)(QA_DISCOVERY_REFERENCES);
-  expect(options.structuredResponse).toBe(true);
+  expect(options.schemaTransport).toBe(true);
+  expect(options.compactReasoning).toBe(true);
   expect(options.maxTokens).toBe(65_536);
   expect(options.stream).toBe(true);
   expect(options.effort).toBe('medium');
   expect(source.match(/^\s+effort: '/gm)).toHaveLength(1);
+  // The ~64k-token review bundle gets only ship's output cap and streaming; its effort and response format stay default.
+  const review = source.match(/testIfSelected\('review\/SKILL\.md workflow',[\s\S]*?await runWorkflowJudge\(\{([\s\S]*?)\n    \}\);/);
+  expect(review).not.toBeNull();
+  const reviewOptions = new Function('QA_DISCOVERY_REFERENCES', `return ({${review![1]}});`)(QA_DISCOVERY_REFERENCES);
+  expect([reviewOptions.maxTokens, reviewOptions.stream, reviewOptions.effort, reviewOptions.schemaTransport, reviewOptions.compactReasoning])
+    .toEqual([65_536, true, undefined, undefined, undefined]);
   expect(WORKFLOW_JUDGE_RESPONSE_SCHEMA.properties.reasoning).not.toHaveProperty('pattern');
   expect(WORKFLOW_JUDGE_RESPONSE_SCHEMA.properties.reasoning).not.toHaveProperty('maxLength');
-  expect(source.match(/structuredResponse: true/g)).toHaveLength(1);
+  expect(source.match(/compactReasoning: true/g)).toHaveLength(1);
   const f = fixture();
   const stream = spyOn(Messages.prototype, 'stream').mockReturnValue({ finalMessage: async () => ({
     stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(scores) }],
   }) } as any);
   try {
     const h = actualCallback(f, { judge: (prompt, model, request) => callJudge<typeof scores>(prompt, model, request) });
-    await h.run({ ...h.options, structuredResponse: options.structuredResponse, maxTokens: options.maxTokens, stream: options.stream, effort: options.effort });
+    await h.run({ ...h.options, schemaTransport: options.schemaTransport, compactReasoning: options.compactReasoning, maxTokens: options.maxTokens, stream: options.stream, effort: options.effort });
     expect(stream.mock.calls[0]).toEqual([{
       model: resolveEvalModel('judge'), max_tokens: 65_536,
       output_config: { format: { type: 'json_schema', schema: WORKFLOW_JUDGE_RESPONSE_SCHEMA }, effort: 'medium' },
@@ -417,7 +424,8 @@ test('Ship sends its authorized 64k cap and compact response contract through th
     expect(h.records[0]).toMatchObject({ passed: true, judge_scores: { clarity: 4, completeness: 5, actionability: 4 } });
     expect(f.entries()).toHaveLength(1);
     expect(f.cache().lookup()).toBeNull();
-    f.opts.structuredResponse = true;
+    f.opts.schemaTransport = true;
+    f.opts.compactReasoning = true;
     f.opts.maxTokens = 65_536;
     f.opts.stream = true;
     expect(f.cache().lookup()).toBeNull();
@@ -428,7 +436,7 @@ test('Ship sends its authorized 64k cap and compact response contract through th
 
 test('changing response serialization misses the cache even when prompt and model match', () => {
   const f = fixture(); f.cache().publish(panel);
-  f.opts.structuredResponse = true;
+  f.opts.schemaTransport = true;
   expect(f.cache().lookup()).toBeNull();
   f.cache().publish(panel);
   expect(f.entries()).toHaveLength(2);
@@ -439,8 +447,44 @@ test('changing response serialization misses the cache even when prompt and mode
     expect(f.cache().lookup()).toBeNull();
   } finally { WORKFLOW_JUDGE_RESPONSE_SCHEMA.properties.reasoning.description = description; }
   expect(f.cache().lookup()?.samples).toEqual(panel);
-  f.opts.structuredResponse = false;
+  f.opts.schemaTransport = false;
   expect(f.cache().lookup()?.samples).toEqual(panel);
+});
+
+test('schema transport and the compact-reasoning validator independently affect workflow cache identity', () => {
+  const f = fixture(); f.cache().publish(panel);
+  f.opts.schemaTransport = true;
+  expect(f.cache().lookup()).toBeNull();
+  f.cache().publish(panel);
+  f.opts.compactReasoning = true;
+  expect(f.cache().lookup()).toBeNull();
+  f.cache().publish(panel);
+  expect(f.entries()).toHaveLength(3);
+  f.opts.compactReasoning = false;
+  expect(f.cache().lookup()?.samples).toEqual(panel);
+  const long = { ...scores, reasoning: Array(150).fill('word').join(' ') };
+  expect(validWorkflowJudgeScore(long, { clarity: 1, completeness: 1, actionability: 1 })).toBe(true);
+  expect(validWorkflowJudgeScore(long, { clarity: 1, completeness: 1, actionability: 1 }, true)).toBe(false);
+});
+
+test('schema transport alone sends the schema without applying the compact-reasoning validator', async () => {
+  const f = fixture();
+  const long = { ...scores, reasoning: Array(150).fill('word').join(' ') };
+  const create = spyOn(Messages.prototype, 'create').mockResolvedValue({
+    stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(long) }],
+  } as any);
+  try {
+    const h = actualCallback(f, { judge: (prompt, model, request) => callJudge<typeof scores>(prompt, model, request) });
+    await h.run({ ...h.options, schemaTransport: true });
+    expect(create.mock.calls[0]).toEqual([{
+      model: resolveEvalModel('judge'), max_tokens: 8192,
+      output_config: { format: { type: 'json_schema', schema: WORKFLOW_JUDGE_RESPONSE_SCHEMA } },
+      messages: [{ role: 'user', content: f.opts.prompt }],
+    }, { signal: h.signals[0] }]);
+    expect(h.records[0]).toMatchObject({ passed: true });
+    const validated = actualCallback(f, { judge: (prompt, model, request) => callJudge<typeof scores>(prompt, model, request) });
+    await expect(validated.run({ ...validated.options, testName: 'validated', schemaTransport: true, compactReasoning: true })).rejects.toThrow('compact response contract');
+  } finally { create.mockRestore(); }
 });
 
 test('the actual cap and streaming transport independently affect workflow cache identity', () => {
@@ -475,7 +519,7 @@ test('the structured callback rejects incomplete, schema-invalid and below-thres
       stream.mockReturnValue({ finalMessage: async () => ({ stop_reason: response.stop_reason,
         content: [{ type: 'text', text: JSON.stringify(response.value) }] }) } as any);
       const h = actualCallback(f, { judge: (prompt, model, request) => callJudge<typeof scores>(prompt, model, request) });
-      await expect(h.run({ ...h.options, structuredResponse: true, maxTokens: 65_536, stream: true })).rejects.toThrow();
+      await expect(h.run({ ...h.options, schemaTransport: true, compactReasoning: true, maxTokens: 65_536, stream: true })).rejects.toThrow();
       expect(h.records).toHaveLength(1);
       expect(h.records[0].passed).toBe(false);
       expect(f.entries()).toHaveLength(0);
@@ -528,14 +572,14 @@ describe('judge panel', () => {
     expect(String(error)).toContain(`sample 1 of ${SAMPLES} failed beside scored samples`);
   });
 
-  test('numeric dimensions gate on the per-dimension mean; one low sample can be outvoted, a low mean cannot', () => {
-    const outvoted = judgePanelMean([panelScore(2), panelScore(4), panelScore(4)], JUDGE_SCORE_DIMENSIONS);
-    expect(outvoted.clarity).toBeCloseTo(10 / 3);
-    expect(outvoted.clarity).toBeGreaterThanOrEqual(panelThresholds.clarity);
-    const low = judgePanelMean([panelScore(2), panelScore(2), panelScore(4)], JUDGE_SCORE_DIMENSIONS);
+  test('numeric dimensions gate on the per-dimension median: 2 of 3 samples decide, the mean is only reported', () => {
+    const outvoted = judgePanelMedian([panelScore(2), panelScore(4), panelScore(4)], JUDGE_SCORE_DIMENSIONS);
+    expect(outvoted.clarity).toBe(4);
+    expect(judgePanelMean([panelScore(2), panelScore(4), panelScore(4)], JUDGE_SCORE_DIMENSIONS).clarity).toBeCloseTo(10 / 3);
+    const low = judgePanelMedian([panelScore(2), panelScore(2), panelScore(4)], JUDGE_SCORE_DIMENSIONS);
     expect(low.clarity).toBeLessThan(panelThresholds.clarity);
-    // No compensation across dimensions: each is averaged on its own.
-    expect(judgePanelMean([panelScore(5, 1), panelScore(5, 1), panelScore(5, 1)], JUDGE_SCORE_DIMENSIONS).completeness).toBe(1);
+    // No compensation across dimensions: each is gated on its own.
+    expect(judgePanelMedian([panelScore(5, 1), panelScore(5, 1), panelScore(5, 1)], JUDGE_SCORE_DIMENSIONS).completeness).toBe(1);
   });
 
   test('malformed sample fields fail the panel instead of averaging to NaN', () => {
@@ -577,7 +621,7 @@ describe('judge panel', () => {
   });
 });
 
-// Stored browse reference panel means against the judge floors.
+// Stored browse reference panel means (recorded before EVAL_POLICY v3) against the judge floors.
 {
   type Scores = { clarity: number; completeness: number; actionability: number };
   const stored = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/browse-judge/panel-means.json'), 'utf8')) as

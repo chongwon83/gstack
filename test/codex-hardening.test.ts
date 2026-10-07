@@ -51,6 +51,44 @@ function tempHome(): string {
 }
 
 describe('gstack-codex-probe: auth probe', () => {
+  // #2192: custom OpenAI-compatible providers name their credential variable
+  // in config.toml [model_providers.<id>] env_key; a set variable is auth.
+  const withConfig = (toml: string, env: Record<string, string | undefined> = {}) => {
+    const home = tempHome();
+    try {
+      fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), toml);
+      return runProbe({ snippet: '_gstack_codex_auth_probe', env, home });
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  };
+  const MIMO = '[model_providers.mimo]\nenv_key = "MIMO_API_KEY"\n';
+
+  test('#2192: a provider env_key whose variable is set → AUTH_OK', () => {
+    const r = withConfig(MIMO, { MIMO_API_KEY: 'tp-test-key' });
+    expect([r.stdout.trim(), r.status]).toEqual(['AUTH_OK', 0]);
+    const several = withConfig('[model_providers.a]\nenv_key = "MISSING_A"\n\n[model_providers.b]\nenv_key = \'MIMO_API_KEY\'  # inline comment\n', { MIMO_API_KEY: 'k' });
+    expect(several.stdout.trim()).toBe('AUTH_OK');
+  });
+
+  test('#2192: a provider env_key that is unset or blank → AUTH_FAILED naming the key', () => {
+    for (const value of [undefined, '   \t\n']) {
+      const r = withConfig(MIMO, { MIMO_API_KEY: value });
+      expect([r.stdout.trim(), r.status]).toEqual(['AUTH_FAILED', 1]);
+      expect(r.stderr).toContain('custom provider key (MIMO_API_KEY)');
+    }
+  });
+
+  test('#2192: commented env_key lines and env_key outside [model_providers.*] never count', () => {
+    const toml = '[model_providers.mimo]\n# env_key = "DEPRECATED_KEY"\nenv_key = "MIMO_API_KEY"\n[profiles.work]\nenv_key = "PROFILE_KEY"\n';
+    expect(withConfig(toml, { DEPRECATED_KEY: 'old', PROFILE_KEY: 'p' }).stdout.trim()).toBe('AUTH_FAILED');
+  });
+
+  test('#2192: malformed config.toml or a non-identifier env_key → AUTH_FAILED, no crash', () => {
+    expect(withConfig('\x00\x01 garbage \xff[broken\n=no=\n').stdout.trim()).toBe('AUTH_FAILED');
+    const injected = withConfig('[model_providers.x]\nenv_key = "A;touch /tmp/never"\n');
+    expect([injected.stdout.trim(), injected.status]).toEqual(['AUTH_FAILED', 1]);
+  });
+
   test('CODEX_API_KEY set → AUTH_OK', () => {
     const home = tempHome();
     try {
@@ -278,13 +316,14 @@ describe('gstack-codex-probe: timeout wrapper + namespace hygiene', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-gto-stub-'));
     try {
       const stub = path.join(dir, 'gtimeout');
-      fs.writeFileSync(stub, '#!/bin/bash\necho gtimeout_chosen_$1\n');
+      fs.writeFileSync(stub, '#!/bin/bash\necho gtimeout_chosen "$@"\n');
       fs.chmodSync(stub, 0o755);
       const r = runProbe({
         snippet: `_gstack_codex_timeout_wrapper 5 echo nope`,
         env: { PATH: `${dir}:/bin:/usr/bin` },
       });
-      expect(r.stdout.trim()).toBe('gtimeout_chosen_5');
+      // The KILL escalation (#2776) precedes the duration, as timeout(1) requires.
+      expect(r.stdout.trim()).toBe('gtimeout_chosen -k 10 5 echo nope');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -308,6 +347,72 @@ describe('gstack-codex-probe: timeout wrapper + namespace hygiene', () => {
         env: { PATH: dir },
       });
       expect(r.stdout).toContain('rc=124');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  for (const native of [false, true]) test(`${native ? 'bash-native watchdog' : 'timeout(1)'} KILLs a child that ignores TERM after the grace period (#2776)`, () => {
+    // An uncooperative provider used to outlive its deadline, so the outer
+    // tool gate killed the whole call and the partial output was lost.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-watchdog-stubborn-'));
+    try {
+      // pkill is part of the watchdog's contract (it reaps the provider's
+      // children; stock macOS ships /usr/bin/pkill). Without it the orphaned
+      // `sleep 30` keeps stdout open and the capture waits out the sleep.
+      for (const tool of native ? ['bash', 'sleep', 'cat', 'pkill'] : []) {
+        const resolved = spawnSync('bash', ['-c', `command -v ${tool}`], { timeout: 5000 });
+        fs.symlinkSync(resolved.stdout.toString().trim(), path.join(dir, tool));
+      }
+      const stubborn = path.join(dir, 'stubborn');
+      fs.writeFileSync(stubborn, `#!${spawnSync('bash', ['-c', 'command -v bash'], { timeout: 5000 }).stdout.toString().trim()}\ntrap '' TERM\necho partial\nsleep 30\necho late\n`, { mode: 0o755 });
+      const r = runProbe({
+        snippet: `_GSTACK_CODEX_KILL_AFTER=1 _gstack_codex_timeout_wrapper 1 "${stubborn}"; echo "rc=$?"`,
+        env: native ? { PATH: dir } : {},
+      });
+      expect(r.stdout).toContain('partial');
+      expect(r.stdout).not.toContain('late');
+      expect(r.stdout).toContain('rc=124');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('bash-native watchdog freezes the command before reaping its children, so nothing prints after the deadline', () => {
+    // A slow pkill widens the window between reaping the children and killing
+    // the command: a watchdog that does not stop the command first lets it run
+    // on past its killed child and print after the deadline.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-watchdog-freeze-'));
+    try {
+      const which = (tool: string) => spawnSync('bash', ['-c', `command -v ${tool}`], { timeout: 5000 }).stdout.toString().trim();
+      for (const tool of ['bash', 'sleep', 'cat']) fs.symlinkSync(which(tool), path.join(dir, tool));
+      fs.writeFileSync(path.join(dir, 'pkill'), `#!${which('bash')}\n"${which('pkill')}" "$@"\nrc=$?\n"${which('sleep')}" 0.5\nexit "$rc"\n`, { mode: 0o755 });
+      const stubborn = path.join(dir, 'stubborn');
+      fs.writeFileSync(stubborn, `#!${which('bash')}\ntrap '' TERM\necho partial\nsleep 30\necho late\n`, { mode: 0o755 });
+      const r = runProbe({
+        snippet: `_GSTACK_CODEX_KILL_AFTER=1 _gstack_codex_timeout_wrapper 1 "${stubborn}"; echo "rc=$?"`,
+        env: { PATH: dir },
+      });
+      expect(r.stdout).toBe('partial\nrc=124\n');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  for (const native of [false, true]) test(`E5: ${native ? 'bash-native watchdog' : 'timeout(1)'} passes the caller's stdin to the command (#1674)`, () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-watchdog-stdin-'));
+    try {
+      for (const tool of native ? ['bash', 'sleep', 'cat', 'printf'] : []) {
+        const resolved = spawnSync('bash', ['-c', `command -v ${tool}`], { timeout: 5000 });
+        const target = resolved.stdout.toString().trim();
+        if (target.startsWith('/')) fs.symlinkSync(target, path.join(dir, tool));
+      }
+      // A redirect onto the wrapper is how callers feed `codex exec -`; a
+      // backgrounded command without job control would otherwise read /dev/null.
+      const input = path.join(dir, 'prompt.txt');
+      fs.writeFileSync(input, 'prompt on stdin');
+      const r = runProbe({ snippet: `_gstack_codex_timeout_wrapper 5 cat < "${input}"; echo " rc=$?"`, env: native ? { PATH: dir } : {} });
+      expect(r.stdout).toBe('prompt on stdin rc=0\n');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -602,13 +707,16 @@ describe('codex skeleton+sections union: review sandbox + fail-closed gate + tim
   for (const relPath of ['codex tmpl union', 'codex rendered union'] as const) {
     const read = () => readCodexUnion(relPath === 'codex tmpl union' ? 'tmpl' : 'rendered');
 
-    test(`${relPath}: (a) every scoped codex review invocation pins sandbox_mode="read-only"`, () => {
+    test(`${relPath}: (a) every scoped codex review invocation pins sandbox_mode from the selected sandbox`, () => {
       const invocations = read()
         .split('\n')
         .filter((l) => /_gstack_codex_timeout_wrapper\s+\d+\s+codex\s+review\b/.test(l));
       expect(invocations.length).toBeGreaterThanOrEqual(1);
       for (const line of invocations) {
-        expect(line).toContain('sandbox_mode="read-only"');
+        // _gstack_codex_select_model sets read-only (full access only for
+        // GSTACK_CODEX_NO_SANDBOX=1, test/codex-model-probe.test.ts); :? stops
+        // an unselected command instead of inheriting config.toml's default.
+        expect(line).toContain('sandbox_mode=\\"${_GSTACK_CODEX_SANDBOX:?}\\"');
         // `codex review` has no -s/--sandbox flag (verified 0.147.0) — the
         // config override is the only lever. `-s read-only` here would fail
         // at argv parsing, which check (b) would then read as a gate FAIL.
@@ -847,4 +955,40 @@ describe('codex broken-install detection (#2742)', () => {
     // collapses 1 and 2 into one branch and loses the distinction.
     expect(src).toContain('_CODEX_MP=$?');
   });
+});
+
+// --- Live codex smokes keep away from the real Codex home -------------------
+
+describe('live codex smokes run codex in a private HOME and CODEX_HOME', () => {
+  // Every codex run writes $CODEX_HOME/tmp/arg0. The two smokes below probe the
+  // CLI at module load or in free-tier tests, so with a real codex on PATH they
+  // used to write into the developer's ~/.codex.
+  for (const file of ['test/codex-resume-flag-semantics.test.ts', 'test/codex-e2e-sol-scope.test.ts']) {
+    test(`${file} never runs codex with the caller's HOME or Codex home`, () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-codex-smoke-home-'));
+      try {
+        const stubDir = path.join(home, 'stub-bin');
+        const log = path.join(home, 'codex-calls.log');
+        fs.mkdirSync(stubDir);
+        fs.writeFileSync(path.join(stubDir, 'codex'), `#!/usr/bin/env bash
+printf '%s|%s\\n' "$HOME" "\${CODEX_HOME:-unset}" >> "${log}"
+mkdir -p "\${CODEX_HOME:-$HOME/.codex}/tmp" && : > "\${CODEX_HOME:-$HOME/.codex}/tmp/arg0"
+printf 'Usage: codex exec [OPTIONS]\\n  -c, --config <key=value>  sandbox_mode\\n      --ignore-user-config\\n'
+`, { mode: 0o755 });
+        const r = spawnSync(process.execPath, ['test', file], {
+          cwd: ROOT, encoding: 'utf8', timeout: 120_000,
+          env: { PATH: `${stubDir}:${process.env.PATH ?? ''}`, HOME: home, TMPDIR: os.tmpdir() },
+        });
+        expect(r.status).toBe(0);
+        const calls = fs.readFileSync(log, 'utf8').trim().split('\n');
+        expect(calls.length).toBeGreaterThan(0);
+        for (const call of calls) {
+          const [callHome, codexHome] = call.split('|');
+          expect({ call, privateHome: callHome !== home, privateCodexHome: codexHome !== 'unset' && !codexHome!.startsWith(home) })
+            .toEqual({ call, privateHome: true, privateCodexHome: true });
+        }
+        expect(fs.existsSync(path.join(home, '.codex'))).toBe(false);
+      } finally { fs.rmSync(home, { recursive: true, force: true }); }
+    });
+  }
 });

@@ -309,6 +309,10 @@ test('legacy verdict permits early blocking or one evidenced changed-input re-au
       expect(docsActorVerdict(state, 'Documentation: blocked', false), label).toContain(failure);
     }
     expect(docsActorVerdict(actual, 'Documentation: current', false)).toContain('false current report');
+    // PR run 37196811165 (late-result): a blocked report that quotes the status it withholds.
+    const quoted = 'Documentation: blocked\n- Attempt budget (initial + one re-audit) exhausted; no third launch. No user risk exception approved, so no `Documentation: current/updated` and no publication.';
+    expect(docsActorVerdict(actual, quoted, false)).not.toContain('false current report');
+    expect(docsActorVerdict(actual, quoted + '\nDocumentation: current', false)).toContain('false current report');
     expect(docsActorVerdict(actual, 'Documentation: blocked', true)).toContain('wrong parent publication decision');
   } finally { fixture.clean(); }
 });
@@ -693,8 +697,11 @@ for (const [name, mutation] of [
   expect(fs.existsSync(fixture.home)).toBe(false);
 });
 `);
+    const home = path.join(dir, 'home');
+    fs.mkdirSync(home);
     const result = Bun.spawnSync([process.execPath, 'test', script], {
       env: { ...process.env, EVALS: '', EVALS_TIER: '', EVALS_ALL: '', EVALS_RUN_ID: 'free-docsync-faults',
+        HOME: home, USERPROFILE: home,
         GSTACK_EVAL_DIR: path.join(dir, 'evidence'), GSTACK_HOME: path.join(dir, 'state') },
       stdout: 'pipe', stderr: 'pipe', timeout: 120_000,
     });

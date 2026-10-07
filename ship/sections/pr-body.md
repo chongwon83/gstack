@@ -10,8 +10,8 @@ then return here for a new lookup, fresh body and both redaction scans before pu
 
 1. Resolve the archive directory and branch:
    ```bash
-   eval "$(~/.claude/skills/gstack/bin/gstack-paths)"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
-   eval "$(~/.claude/skills/gstack/bin/gstack-slug)"
+   GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+   SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG)
    CURRENT_BRANCH=$(git branch --show-current)
    SPEC_ARCHIVES="$GSTACK_STATE_ROOT/projects/$SLUG/specs"
    ```
@@ -44,6 +44,7 @@ details for cards whose file type has no known comment syntax.>
 
 ## Pre-Landing Review
 <findings from Step 9 code review, or "No issues found.">
+<Outside review: its verdict; `unverified` or `unavailable` is listed as missing coverage with its reason, never as passed.>
 
 ## Exploratory QA
 <Step 9's current surfaces/charters, reproducers, approved regressions and red/green
@@ -69,7 +70,7 @@ unavailable results as passing.>
 
 ## Plan Completion
 <If plan file found: completion checklist summary from Step 8>
-<If no plan file: "No plan file detected.">
+<If Step 8 printed the not-run line: that line verbatim.>
 <If plan items deferred: list deferred items>
 
 ## Linked Spec
@@ -90,7 +91,11 @@ Unavailable/inconclusive is never PASS.>
 <If TODOS.md doesn't exist and user skipped: omit this section>
 
 ## Documentation
-<Embed Step 14.5's vetted nonempty `documentation_section` for this invocation.>
+<Embed Step 14.5's vetted nonempty `documentation_section` for this invocation:
+its saved section file, inserted unchanged by the scan block's `DOCS_SECTION_FILE` lines.
+A blocked audit shipped under a user exception has no section file: state its
+blocked status, scope and exception here and drop the block's `DOCS_SECTION_FILE` guard
+and its `cat -- "$DOCS_SECTION_FILE" && echo &&` step.>
 <Always include the status and reviewed scope: updated, current, or blocked with the actual user's named risk exception. Never omit this section or reuse another invocation's audit.>
 
 ## Test plan
@@ -102,24 +107,42 @@ Unavailable/inconclusive is never PASS.>
 #### Redaction scan (PR body + title) — runs before create AND edit
 
 The PR body is world-readable on a public repo. Scan-at-sink before sending:
-write the composed body to a temp file, scan THAT file with the shared engine,
+compose the body into a temp file, scan THAT file with the shared engine,
 and pass the same file to `gh`/`glab`. Wrap any Codex / Greptile / eval output
 sections in tool-attributed fences (` ```codex-review ` / ` ```greptile `) so the
 engine WARN-degrades the example credentials those tools quote instead of blocking
 the PR (a live-format credential inside the fence still blocks).
 
+Write the body from above into two private files: the first through the
+`## Documentation` heading line, the second from `## Test plan` on.
+
+```bash
+_GT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp"
+mkdir -p "$_GT" && chmod 700 "$_GT" || { echo "Not sent: cannot create $_GT for the text file." >&2; exit 1; }
+_EX=$(git rev-parse --git-path info/exclude 2>/dev/null) && mkdir -p "$(dirname "$_EX")" && { grep -qxF '/.gstack/tmp/' "$_EX" 2>/dev/null || echo '/.gstack/tmp/' >> "$_EX"; }
+BODY_TOP_FILE=$(mktemp "${_GT:?}/pr-body-top.XXXXXX") || { echo "Not sent: mktemp failed in $_GT." >&2; exit 1; }; echo "BODY_TOP_FILE: $BODY_TOP_FILE (name: ${BODY_TOP_FILE##*/})"
+BODY_REST_FILE=$(mktemp "${_GT:?}/pr-body-rest.XXXXXX") || { echo "Not sent: mktemp failed in $_GT." >&2; exit 1; }; echo "BODY_REST_FILE: $BODY_REST_FILE (name: ${BODY_REST_FILE##*/})"
+```
+
+Write the text into each printed file with your file-write tool (Claude Code's Write tool needs a Read of the empty file first), exactly as it should appear. The text never goes into a shell command, heredoc or quoted argument. If a write fails or is refused, do not send: print the cause, the file path and the command below for sending by hand.
+
 Use Step 18's `NEW_TITLE` unchanged; its version prefix is already present.
-In a new shell, restore the saved literal title before this block.
+In a new shell, restore the saved literal title before this block, and Step 14.5's
+saved section file path as `DOCS_SECTION_FILE`. Substitute the printed names. The
+block deletes both drafts; to change the body, write fresh ones.
 
 ```bash
 : "${NEW_TITLE:?Restore the saved Step 18 title before scanning}"
+: "${DOCS_SECTION_FILE:?Restore the saved Step 14.5 section file path before composing}"
 REDACT_VIS=$(~/.claude/skills/gstack/bin/gstack-config get redact_repo_visibility 2>/dev/null)
 [ -z "$REDACT_VIS" ] && REDACT_VIS=$(gh repo view --json visibility -q .visibility 2>/dev/null | tr 'A-Z' 'a-z')
 REDACT_VIS="${REDACT_VIS:-unknown}"
-PR_BODY_FILE=$(mktemp) || { echo "ERROR: mktemp failed — cannot scan the PR body; refusing to create the PR unscanned." >&2; exit 1; }
-cat > "$PR_BODY_FILE" <<'PR_BODY_EOF'
-<PR body from above>
-PR_BODY_EOF
+PR_BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/gstack-pr-body.XXXXXX") || { echo "ERROR: mktemp failed — cannot scan the PR body; refusing to create the PR unscanned." >&2; exit 1; }
+BODY_TOP_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<body-top-file-name>"
+BODY_REST_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<body-rest-file-name>"
+[ -s "$BODY_TOP_FILE" ] && [ -s "$BODY_REST_FILE" ] || { echo "Not scanned: $BODY_TOP_FILE or $BODY_REST_FILE is empty, so the body was never written. Write both, then rerun." >&2; exit 1; }
+{ awk 1 "$BODY_TOP_FILE" && cat -- "$DOCS_SECTION_FILE" && echo && awk 1 "$BODY_REST_FILE"; } > "$PR_BODY_FILE" || exit 1
+rm -f "$BODY_TOP_FILE" "$BODY_REST_FILE"
 ~/.claude/skills/gstack/bin/gstack-redact --from-file "$PR_BODY_FILE" --repo-visibility "$REDACT_VIS" --self-email "$(git config user.email 2>/dev/null)" --json
 case $? in
   0) ;;
@@ -146,7 +169,7 @@ Update the title with the same scanned `NEW_TITLE`: `gh pr edit --title "$NEW_TI
 
 **REST fallback:** if `gh pr edit` fails with the `repository.pullRequest.projectCards` GraphQL deprecation, do not re-ask for auth. Use the SAME scanned file: `PR_NUMBER=$(gh pr view --json number -q .number)`, then `gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" -X PATCH -F body=@"$PR_BODY_FILE"`; for the title use `gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" -X PATCH -f title="$NEW_TITLE"`.
 
-**Self-check:** re-fetch the title and assert it starts with `v$NEW_VERSION `. Retry once if wrong, then surface any failure. Print the existing URL and continue to Step 20; do not run the create commands below.
+**Self-check:** re-fetch the title and assert it equals `NEW_TITLE`. Retry once if wrong, then surface any failure. Print the existing URL and continue to Step 20; do not run the create commands below.
 
 **No open PR/MR, GitHub:**
 

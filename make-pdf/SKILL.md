@@ -30,10 +30,7 @@ Voice triggers (speech-to-text aliases): "make this a pdf", "make it a pdf", "ex
 ## Preamble (run first)
 
 ```bash
-_SS="$HOME/.claude/skills/gstack/bin/gstack-skill-start"
-[ -x "$_SS" ] || _SS=".claude/skills/gstack/bin/gstack-skill-start"
-"$_SS" --skill "make-pdf" --model "claude" --parent-pid "$PPID" \
-  || echo "SKILL_START: unavailable — stale install; run ./setup or /gstack-upgrade (preamble degraded, continue the user's task)"
+~/.claude/skills/gstack/bin/gstack-skill-start --skill "make-pdf" --model "claude"
 ```
 
 Read the echoed `KEY: value` STATUS lines — they drive every preamble rule
@@ -66,7 +63,7 @@ P=""
 if [ -x "$P" ]; then
   echo "MAKE_PDF_READY: $P"
   alias _p_="$P"   # shellcheck alias helper (not exported)
-  export P   # available as $P in subsequent blocks within the same skill invocation
+  export P   # env-var hosts re-derive $P in every later block (runtime prelude)
 else
   echo "MAKE_PDF_NOT_AVAILABLE (run './setup' in the gstack repo to build it)"
 fi
@@ -79,27 +76,27 @@ If `MAKE_PDF_READY` is printed: `$P` is the binary path for the rest of
 the skill. Use `$P` (not an explicit path) so the skill body stays portable.
 
 Core commands:
-- `$P generate <input.md> [output.pdf]` — render markdown to PDF (80% use case)
-- `$P generate --cover --toc essay.md out.pdf` — full publication layout
-- `$P generate --watermark DRAFT memo.md draft.pdf` — diagonal DRAFT watermark
-- `$P preview <input.md>` — render HTML and open in browser (fast iteration)
-- `$P setup` — verify the browser (Aside, or gstack's own headless fallback) + pdftotext and run a smoke test
-- `$P --help` — full flag reference
+- `"$P" generate <input.md> [output.pdf]` — render markdown to PDF (80% use case)
+- `"$P" generate --cover --toc essay.md out.pdf` — full publication layout
+- `"$P" generate --watermark DRAFT memo.md draft.pdf` — diagonal DRAFT watermark
+- `"$P" preview <input.md>` — render HTML and open in browser (fast iteration)
+- `"$P" setup` — verify the browser (Aside, or gstack's own headless fallback) + pdftotext and run a smoke test
+- `"$P" --help` — full flag reference
 
 Output contract:
 - `stdout`: ONLY the output path on success. One line.
 - `stderr`: progress (`Rendering HTML... Generating PDF...`) unless `--quiet`.
-- Exit 0 success / 1 bad args / 2 render error / 3 Paged.js timeout / 4 no browser available (open the Aside app, or run `./setup` to build gstack's own browser).
+- Exit 0 success / 1 bad args / 2 render error / 3 TOC page numbers failed / 4 no browser available (open the Aside app, or run `./setup` to build gstack's own browser).
 
 PDFs print through Aside when it is running and through gstack's own headless browser otherwise; the stderr progress line says which (`Rendering PDF through Aside` / `through gstack's browser`).
 
 ## Plan Mode Safe Operations
 
-In plan mode, allowed because they inform the plan: `$B`, `$D`, `codex exec`/`codex review`, temp prompts, writes to `~/.gstack/`, writes to the plan file, and `open` for generated artifacts.
+Host and system plan-mode restrictions and the user's current scope take precedence over any skill; a skill cannot grant itself an exception to read-only mode. Where the host permits them, these inform the plan: `$B`, `$D`, `codex exec`/`codex review`, temp prompts, writes to `~/.gstack/`, writes to the plan file, and `open` for generated artifacts. If the host blocks one, skip it, say so, and continue the permitted work.
 
 ## Skill Invocation During Plan Mode
 
-If the user invokes a skill in plan mode, the skill takes precedence over generic plan mode behavior. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; any AskUserQuestion the skill fires is the workflow operating within plan mode, not a violation of it — and a skill whose instructions resolve a question themselves (e.g. a plan-mode auto-select) may legitimately not ask it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If AskUserQuestion is unavailable or a call fails, follow the AskUserQuestion Format failure fallback: `headless` → BLOCKED; `interactive` → the prose fallback (also satisfies end-of-turn). At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" execute. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
+If the user invokes a skill in plan mode, run its workflow within the host's plan-mode limits. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; any AskUserQuestion the skill fires is the workflow operating within plan mode, not a violation of it — and a skill whose instructions resolve a question themselves (e.g. a plan-mode auto-select) may legitimately not ask it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If AskUserQuestion is unavailable or a call fails, follow the AskUserQuestion Format failure fallback: `headless` → BLOCKED; `interactive` → the prose fallback (also satisfies end-of-turn). At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" run only where the host permits them. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
 
 If `PROACTIVE` is `false`, do not auto-invoke or suggest skills, including by asking whether to run one. Only run skills the user explicitly invokes.
 
@@ -227,14 +224,14 @@ One command, no flags. Gets a clean PDF with running header + page numbers
 + CONFIDENTIAL footer by default.
 
 ```bash
-$P generate letter.md                 # writes /tmp/letter.pdf
-$P generate letter.md letter.pdf      # explicit output path
+"$P" generate letter.md                 # writes /tmp/letter.pdf
+"$P" generate letter.md letter.pdf      # explicit output path
 ```
 
 ### Publication mode — cover + TOC + chapter breaks
 
 ```bash
-$P generate --cover --toc --author "Garry Tan" --title "On Horizons" \
+"$P" generate --cover --toc --author "Garry Tan" --title "On Horizons" \
   essay.md essay.pdf
 ```
 
@@ -244,7 +241,7 @@ Each top-level H1 in the markdown starts a new page. Disable with
 ### Draft-stage watermark
 
 ```bash
-$P generate --watermark DRAFT memo.md draft.pdf
+"$P" generate --watermark DRAFT memo.md draft.pdf
 ```
 
 Diagonal 10% opacity DRAFT across every page. When the draft is final, drop
@@ -253,7 +250,7 @@ the flag and regenerate.
 ### Fast iteration via preview
 
 ```bash
-$P preview essay.md
+"$P" preview essay.md
 ```
 
 Renders HTML with the same print CSS and opens it in your browser. Refresh
@@ -262,7 +259,7 @@ as you edit the markdown. Skip the PDF round trip until you're ready.
 ### Brand-free (no CONFIDENTIAL footer)
 
 ```bash
-$P generate --no-confidential memo.md memo.pdf
+"$P" generate --no-confidential memo.md memo.pdf
 ```
 
 ### Diagrams — mermaid and excalidraw fences render as pictures
@@ -319,10 +316,10 @@ promoted page is vertically centered. When the heuristic guesses wrong,
 ### Other formats — single-file HTML and Word
 
 ```bash
-$P generate readme.md out.html --to html    # ONE self-contained file: inline
+"$P" generate readme.md out.html --to html    # ONE self-contained file: inline
                                             # SVG diagrams, data-URI images,
                                             # zero network refs, screen-readable
-$P generate readme.md out.docx --to docx    # Word: content fidelity (headings,
+"$P" generate readme.md out.docx --to docx    # Word: content fidelity (headings,
                                             # tables, code, diagrams as PNG) —
                                             # layout is Word's, not ours
 ```
@@ -333,7 +330,7 @@ $P generate readme.md out.docx --to docx    # Word: content fidelity (headings,
 ### CI mode — fail loud on missing assets
 
 ```bash
-$P generate docs.md --strict     # missing, remote, out-of-tree, oversized,
+"$P" generate docs.md --strict     # missing, remote, out-of-tree, oversized,
                                  # and non-regular-file images exit non-zero
                                  # instead of warn + placeholder
 ```
@@ -380,22 +377,22 @@ Metadata:
 
 ## When to run it
 
-Run `$P generate` when the user wants markdown as a PDF. If the user has a `.md`
-file open and says "make it look nice", propose `$P generate --cover --toc` and ask
+Run `"$P" generate` when the user wants markdown as a PDF. If the user has a `.md`
+file open and says "make it look nice", propose `"$P" generate --cover --toc` and ask
 before running.
 
 ## Debugging
 
 - Exit 4 / "no browser available" → neither the Aside browser (macOS 15+,
   aside.com) nor gstack's own headless browser is usable. Open Aside, or run
-  `./setup` in the gstack repo to build the fallback, re-run. `$P setup` checks
+  `./setup` in the gstack repo to build the fallback, re-run. `"$P" setup` checks
   the whole chain and says which browser it found.
 - Diagram shows a red "failed to render" block → the parse error is printed in
   the block. If EVERY diagram fails with "diagram renderer:", the browser went
   away mid-run (Aside closed, or the fallback daemon died).
 - Fragmented text on copy-paste → remove fenced code blocks and regenerate
   (no flag turns code styling off).
-- Paged.js timeout → probably no headings in the markdown. Drop `--toc`.
+- Exit 3 (`$P: --toc: …`) → TOC page numbers could not be verified against the printed PDF; the message says why. Drop `--toc`, or shorten very long TOC headings if it says the numbers did not settle.
 - "[remote image blocked]" placeholder in the output → add `--allow-network`
   (understand you're giving the markdown file permission to fetch from its
   image URLs).
@@ -409,8 +406,8 @@ stderr: Rendering HTML...        ← progress spinner (unless --quiet)
         Rendering PDF through Aside...   ← or "through gstack's browser"
         Done in 11.2s. 43 words · 22KB · /tmp/letter.pdf
 
-exit code: 0 success / 1 bad args / 2 render error / 3 Paged.js timeout
+exit code: 0 success / 1 bad args / 2 render error / 3 TOC page numbers failed
            / 4 no browser available (Aside not open, fallback not built)
 ```
 
-Capture the path: `PDF=$($P generate letter.md)` — then use `$PDF`.
+Capture the path: `PDF=$("$P" generate letter.md)` — then use `$PDF`.

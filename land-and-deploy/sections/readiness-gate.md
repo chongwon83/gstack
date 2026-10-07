@@ -143,7 +143,7 @@ this project/revision, report unavailable (warning), not a pass or another repo'
 
 ```bash
 setopt +o nomatch 2>/dev/null || true  # zsh compat
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
 EVAL_DIR=~/.gstack/projects/$SLUG/evals
 ls -t "$EVAL_DIR"/*-e2e-*-$(date +%Y-%m-%d)*.json "$EVAL_DIR"/shards/*/*-e2e-*-$(date +%Y-%m-%d)*.json ~/.gstack-dev/evals/*-e2e-*-$(date +%Y-%m-%d)*.json 2>/dev/null | head -20
 ```
@@ -163,7 +163,7 @@ Apply the same project/revision and applicability checks as E2E above.
 
 ```bash
 setopt +o nomatch 2>/dev/null || true  # zsh compat
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
 EVAL_DIR=~/.gstack/projects/$SLUG/evals
 ls -t "$EVAL_DIR"/*-llm-judge-*-$(date +%Y-%m-%d)*.json "$EVAL_DIR"/shards/*/*-llm-judge-*-$(date +%Y-%m-%d)*.json ~/.gstack-dev/evals/*-llm-judge-*-$(date +%Y-%m-%d)*.json 2>/dev/null | head -5
 ```
@@ -187,7 +187,7 @@ git log --oneline "$BASE_SHA..$PR_HEAD" | head -20
 Compare the PR body against the actual commits. Check for:
 1. **Missing features** — commits that add significant functionality not mentioned in the PR
 2. **Stale descriptions** — PR body mentions things that were later changed or reverted
-3. **Wrong version** — PR title or body references a version that doesn't match VERSION file
+3. **Wrong version** — PR title or body references a version that doesn't match the version file (under NO_VERSION, any version prefix is wrong)
 
 If the PR body looks stale or incomplete: **WARNING — PR body may not reflect current
 changes.** List what's missing or stale.
@@ -207,7 +207,9 @@ git diff --name-only "$BASE_SHA...$PR_HEAD" -- README.md CHANGELOG.md ARCHITECTU
 
 If CHANGELOG.md and VERSION were NOT modified on this branch and the diff includes
 new features (new files, new commands, new skills): **WARNING — /document-release
-likely not run. CHANGELOG and VERSION not updated despite new features.**
+likely not run. CHANGELOG and VERSION not updated despite new features.** Skip the
+VERSION half when Step 3.4 reported NO_VERSION: an unversioned project ships with no
+version change by design.
 
 If only docs changed (no code): skip this check.
 
