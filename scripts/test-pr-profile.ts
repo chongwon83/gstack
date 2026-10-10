@@ -212,6 +212,7 @@ export const FREE_ONLY_PR_FILES = [
   'tsconfig.test.json', // Read only by `tsc -p tsconfig.test.json` (typecheck:test); Bun's runtime reads tsconfig.json.
   '.gitignore', // Changes which untracked files git reports, never tracked content a case reads.
   'scripts/retired-command.ts', // One-release stubs for retired package scripts; no paid case imports it.
+  'careful/bin/check-careful.sh', // /careful PreToolUse hook: covered by test/hook-scripts.test.ts; no paid fixture copies or runs it.
   // Reporting and launch tools: they read CI history or start a lane, never run inside a paid case.
   'scripts/test-health-report.ts',
   'scripts/bump-harness-version.ts',
@@ -226,6 +227,8 @@ export const FREE_ONLY_PR_FILES = [
   '.github/workflows/dependency-review.yml',
   '.github/workflows/free-tests.yml',
   '.github/workflows/make-pdf-gate.yml',
+  '.github/workflows/model-policy-freshness.yml',
+  '.github/workflows/measure-journal-read.yml',
   '.github/workflows/native-qualification.yml',
   '.github/workflows/osv-scanner.yml',
   '.github/workflows/platform-qualification.yml',
@@ -234,6 +237,9 @@ export const FREE_ONLY_PR_FILES = [
   '.github/workflows/scorecard.yml',
   '.github/workflows/skill-docs.yml',
   '.github/workflows/test-health.yml',
+  '.github/workflows/eval-sweep.yml', // The weekly off-ship sweep on main; no PR-gate case reads it, and it never gates a PR.
+  '.github/actionlint.yaml', // Runner labels for actionlint only.
+  'scripts/ship-measure-sweep.ts', // The weekly sweep CLI; it launches paid cases, never runs inside one.
   '.github/workflows/version-gate.yml',
   '.github/workflows/windows-free-tests.yml',
   '.github/workflows/windows-setup-e2e.yml',
