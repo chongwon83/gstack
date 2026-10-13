@@ -6,8 +6,9 @@ import { execFileSync } from 'node:child_process';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { readBoundedStable } from '../lib/cso/bounded-file';
 import { CsoError } from '../lib/cso/contracts';
-import { executable, redact } from '../lib/cso/process';
+import { EMPTY_GLOBAL_GIT_CONFIG, executable, redact } from '../lib/cso/process';
 import { atomicWriteSync } from '../lib/fs-atomic';
+import { redactProducerText, sourceCredentialValues, type OutputRedaction } from './cso-eval-output-redaction';
 import { resolveClaudeCommand } from '../lib/claude-bin';
 import runtimeCatalog from '../lib/cso/runtime-catalog.json';
 import scannerCatalog from '../lib/cso/scanner-images/catalog.json';
@@ -42,6 +43,16 @@ const OUTPUT_LIMIT = 32 * 1024 * 1024;
 const ARTIFACT_FILE_LIMIT = 32 * 1024 * 1024;
 const ARTIFACT_TOTAL_LIMIT = 128 * 1024 * 1024;
 const ARTIFACT_COUNT_LIMIT = 4096;
+/**
+ * `/cso --budget` bounds the helper run: it accepts evidence until its deadline (start + budget) and `finish` writes the
+ * report after it. A user's agent is never killed at the budget, so the provider gets the budget, the agent's time
+ * before `start`, and the reporting time after the deadline. Matches the evaluator's frozen `graceSeconds`.
+ */
+export const PRODUCER_REPORTING_GRACE_SECONDS = 300;
+
+export function producerProviderTimeoutMs(budgetSeconds: number): number {
+  return (budgetSeconds + PRODUCER_REPORTING_GRACE_SECONDS) * 1000;
+}
 
 function inside(parent: string, child: string): boolean {
   const path = relative(parent, child);
@@ -168,6 +179,34 @@ function emptyArtifactInventory(): ProducerArtifactInventory {
   return { ...base, identityHash: producerArtifactInventoryHash(base) };
 }
 
+/** A whole path component that is one of the helper's own identifiers: `<epoch ms>-<hex>` run and replay IDs, retired runs, and hex artifact IDs with an optional lowercase-word prefix (`gitleaks-<hex>-<hex>.json`). */
+const HELPER_ID_COMPONENT = /^(?:\d{13}-[a-f0-9]{16}|\.retired-\d{13}-[a-f0-9]{16}-[a-f0-9]{32}|(?:[a-z]+-)*[a-f0-9]{16,64}(?:-[a-f0-9]{16})*(?:\.[a-z]+)?)$/;
+
+/**
+ * Helper artifact paths are `<repoId>/<runId>/...` plus the helper's public-cache/ and legacy-imports/. Components that
+ * are wholly a helper identifier are checked by shape, because the secret redactor reads them as data (a 13-digit epoch
+ * as a phone number, some 32-hex IDs as wallets). Every other component (fixed helper names, and source paths mirrored
+ * under snapshot/ and readable/) still goes through the redactor.
+ */
+export function assertProducerArtifactPath(relativePath: string): void {
+  const parts = relativePath.split('/');
+  const reject = (rule: string): never => { throw new Error(`INVALID_PRODUCER_ARTIFACTS: ${rule}`); };
+  if (!relativePath || relativePath.length > 1024) reject('an artifact path is empty or longer than 1024 bytes');
+  if (!/^[A-Za-z0-9._/-]+$/.test(relativePath) || parts.some(part => !part || part === '.' || part === '..')) reject('an artifact path has a component outside [A-Za-z0-9._-]');
+  const inRun = /^[a-f0-9]{24}$/.test(parts[0]) && /^(?:\d{13}-[a-f0-9]{16}|\.retired-\d{13}-[a-f0-9]{16}-[a-f0-9]{32})$/.test(parts[1] ?? '');
+  if (parts.length < 2 || !(inRun ? parts.length >= 3 : ['public-cache', 'legacy-imports'].includes(parts[0]))) reject('an artifact lies outside <repoId>/<runId>/, public-cache/ and legacy-imports/');
+  const schemaId = (part: string, index: number) => index === 0 ? /^[a-f0-9]{24}$/.test(part) : HELPER_ID_COMPONENT.test(part);
+  for (const [index, part] of parts.entries()) {
+    if (schemaId(part, index)) continue;
+    let clean: boolean;
+    try { clean = redact(part) === part; } catch { clean = false; }
+    if (!clean) {
+      const parent = parts.slice(0, index).map((item, at) => schemaId(item, at) ? 'ID' : item).join('/');
+      throw new CsoError('REDACTION_FAILED', `artifact path component ${index + 1} under ${JSON.stringify(parent)} looks like a secret; the component is withheld`);
+    }
+  }
+}
+
 export function inventoryProducerArtifacts(helperHome: string): ProducerArtifactInventory {
   const security = join(helperHome, 'security'), artifactRoot = join(security, 'cso');
   for (const directory of [security, artifactRoot]) {
@@ -180,16 +219,14 @@ export function inventoryProducerArtifacts(helperHome: string): ProducerArtifact
   let totalBytes = 0, visited = 0;
   const visit = (directory: string, depth: number): void => {
     if (depth > 32 || ++visited > ARTIFACT_COUNT_LIMIT * 2) throw new Error('INVALID_PRODUCER_ARTIFACTS');
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const full = join(directory, entry.name);
       if (++visited > ARTIFACT_COUNT_LIMIT * 2) throw new Error('INVALID_PRODUCER_ARTIFACTS');
       if (entry.isSymbolicLink()) throw new Error('INVALID_PRODUCER_ARTIFACTS');
       if (entry.isDirectory()) { visit(full, depth + 1); continue; }
       if (!entry.isFile() || entries.length >= ARTIFACT_COUNT_LIMIT) throw new Error('INVALID_PRODUCER_ARTIFACTS');
       const relativePath = relative(artifactRoot, full).split(sep).join('/');
-      if (!relativePath || relativePath.length > 1024 || !/^[A-Za-z0-9._/-]+$/.test(relativePath) || relativePath.split('/').some(part => !part || part === '.' || part === '..') || redact(relativePath) !== relativePath) {
-        throw new CsoError('REDACTION_FAILED', 'Producer artifact path withheld');
-      }
+      assertProducerArtifactPath(relativePath);
       const contents = readBoundedStable(full, ARTIFACT_FILE_LIMIT, 'Producer artifact');
       totalBytes += contents.byteLength;
       if (totalBytes > ARTIFACT_TOTAL_LIMIT) throw new Error('PRODUCER_ARTIFACTS_TOO_LARGE');
@@ -197,14 +234,14 @@ export function inventoryProducerArtifacts(helperHome: string): ProducerArtifact
     }
   };
   visit(artifactRoot, 0);
-  entries.sort((left, right) => left.path.localeCompare(right.path));
+  entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   const base = { schemaVersion: 1 as const, root: 'security/cso' as const, entries, totalBytes };
   return { ...base, identityHash: producerArtifactInventoryHash(base) };
 }
 
 function repositoryIdentity(root: string): string {
   const nullPath = process.platform === 'win32' ? 'NUL' : '/dev/null';
-  const env = { PATH: process.env.PATH ?? '', LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: nullPath, GIT_ATTR_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' };
+  const env = { PATH: process.env.PATH ?? '', LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: EMPTY_GLOBAL_GIT_CONFIG, GIT_ATTR_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' };
   const git = executable('git');
   const config = readBoundedStable(join(root, '.git', 'config'), 1024 * 1024, 'Producer Git configuration').toString('utf8');
   if (/^\s*\[\s*include(?:if)?(?=[\s."\]])/im.test(config)) throw sourceError('.git/config', 'contains an include directive');
@@ -396,7 +433,7 @@ export function producerInstallationIdentity(binding: ProducerHelperBinding): Pr
 }
 
 export const PRODUCER_PROVIDER_POLICY: Record<ProducerHost, { family: ProducerProviderIdentity['family']; policyRevision: string; version: string }> = {
-  claude: { family: 'claude', policyRevision: 'claude-2.1.263-cso-v1', version: '2.1.263 (Claude Code)' },
+  claude: { family: 'claude', policyRevision: 'claude-2.1.263-cso-v2', version: '2.1.263 (Claude Code)' },
   codex: { family: 'gpt', policyRevision: 'codex-0.153.4-cso-v3-generation', version: 'codex-cli 0.153.4' },
   gemini: { family: 'gemini', policyRevision: 'gemini-0.59.0-cso-v1', version: '0.59.0' },
 };
@@ -464,25 +501,34 @@ function writeExclusiveAtomic(path: string, value: unknown): void {
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('RECEIPT_EXISTS'); throw error; }
 }
 
-/** Redact both channels and both concatenation orders before a receipt can bind them. */
-export function sanitizeProducerRun(run: RunResult): RunResult {
+/**
+ * Redact both channels, and both concatenation orders, before a receipt can bind them. A credential-class match
+ * anywhere withholds the output and fails the run, naming the rules. PII, internal, legal and hygiene matches are
+ * replaced in place and leave the run's status alone: scoring reads the helper's report, the evaluator scans the
+ * receipt for its canaries separately, and the helper's own identifiers are not personal data. `sourceCredentials` are
+ * the source's credential-name values (see sourceCredentialValues), matched exactly because no rule sees them bare.
+ */
+export function sanitizeProducerRun(run: RunResult, sourceCredentials: string[] = []): RunResult {
   if (typeof run.output !== 'string' || (run.error && typeof run.error.reason !== 'string')) {
     throw new CsoError('REDACTION_FAILED', 'Producer output withheld because it was not valid text');
   }
   const reason = run.error?.reason ?? '';
+  let views: OutputRedaction[];
   try {
-    const views = [run.output, reason, run.output + reason, reason + run.output];
-    if (views.some(value => redact(value) !== value)) {
-      return {
-        ...run,
-        output: '[sensitive producer output redacted]',
-        error: { code: run.error?.code ?? 'unknown', reason: 'Sensitive producer output or error withheld' },
-      };
-    }
-    return run;
+    views = [run.output, reason, run.output + reason, reason + run.output].map(view => redactProducerText(view, sourceCredentials));
   } catch {
     throw new CsoError('REDACTION_FAILED', 'Producer output withheld because redaction could not safely inspect it');
   }
+  const secret = views.find(view => view.secret);
+  if (secret) {
+    return {
+      ...run,
+      output: '[sensitive producer output redacted]',
+      error: { code: run.error?.code ?? 'unknown', reason: `Sensitive producer output or error withheld: credential-class rule ${secret.rules.join(', ')}` },
+    };
+  }
+  const [output, error] = views;
+  return { ...run, output: output.text, ...(run.error ? { error: { ...run.error, reason: error.text } } : {}) };
 }
 
 export function producerFailureMessage(error: unknown): string {
@@ -494,7 +540,11 @@ export function producerFailureMessage(error: unknown): string {
 
 /** A post-run check failed: the receipt records it as a failed cell with no output or artifacts, keeping the run's usage. */
 export function producerIntegrityFailure(error: unknown): { code: string; reason: string } {
-  if (error instanceof CsoError) return { code: error.code, reason: producerFailureMessage(error) };
+  if (error instanceof CsoError) {
+    let reason: string;
+    try { reason = redact(error.message); } catch { reason = 'detail withheld'; }
+    return { code: error.code, reason };
+  }
   const message = producerFailureMessage(error);
   const named = error instanceof Error && !(error as NodeJS.ErrnoException).code ? /^([A-Z][A-Z0-9_]+)(?::\s*([\s\S]*))?$/.exec(message) : null;
   return named ? { code: named[1], reason: named[2] || named[1] } : { code: 'PRODUCER_POST_RUN_CHECK_FAILED', reason: message };
@@ -525,6 +575,7 @@ export async function runProducerCell(inputPath: string, receiptPath: string, op
   validateSource(sourceRoot, input.source, cell.sourceHash);
   sealProducerSource(sourceRoot);
   validateSource(sourceRoot, input.source, cell.sourceHash);
+  const sourceCredentials = sourceCredentialValues(sourceRoot, input.source.map(entry => entry.path));
   const originalRepositoryIdentity = repositoryIdentity(sourceRoot);
   const stateRoot = join(jobRoot, 'state');
   const helperHome = join(stateRoot, 'cso-home');
@@ -544,7 +595,7 @@ export async function runProducerCell(inputPath: string, receiptPath: string, op
   const runOptions = {
     prompt: promptFor(cell, input.skill, sourceRoot, helper),
     workdir: stateRoot,
-    timeoutMs: cell.budgetSeconds * 1000,
+    timeoutMs: producerProviderTimeoutMs(cell.budgetSeconds),
     model: cell.model,
     csoProducer: {
       stateDirectory: stateRoot,
@@ -584,27 +635,36 @@ export async function runProducerCell(inputPath: string, receiptPath: string, op
   const finishedAt = new Date().toISOString();
   let artifacts = emptyArtifactInventory();
   let integrityFailure: { code: string; reason: string } | undefined;
+  let check = '';
   try {
+    check = 'helper installation';
     const installationAfter = producerInstallationIdentity(helper);
     if (installationAfter.identityHash !== installationIdentity.identityHash) {
       throw new Error('PRODUCER_HELPER_GENERATION_CHANGED: installed helper identity changed during the run');
     }
+    check = 'provider installation';
     const providerAfter = artifactIdentity(provider.command.executable);
     if (providerAfter.sha256 !== providerIdentity.executable.sha256 || providerAfter.bytes !== providerIdentity.executable.bytes) {
       throw new Error('PRODUCER_PROVIDER_INSTALLATION_RACE: provider executable changed during the run');
     }
+    check = 'source modes';
     assertProducerSourceSealed(sourceRoot);
+    check = 'source content';
     validateSource(sourceRoot, input.source, cell.sourceHash);
+    check = 'source Git state';
     if (repositoryIdentity(sourceRoot) !== originalRepositoryIdentity) throw new Error('PRODUCER_CHANGED_SOURCE: Git HEAD, branch, config or status changed during the run');
+    check = 'artifact inventory';
     artifacts = inventoryProducerArtifacts(helperHome);
+    check = 'output size';
     const outputBytes = typeof run.output === 'string' ? Buffer.byteLength(run.output) : 0;
     if (outputBytes > OUTPUT_LIMIT) throw new Error(`PRODUCER_OUTPUT_TOO_LARGE: output is ${outputBytes} bytes; the limit is ${OUTPUT_LIMIT}`);
   } catch (error) {
-    integrityFailure = producerIntegrityFailure(error);
+    const failure = producerIntegrityFailure(error);
+    integrityFailure = { code: failure.code, reason: `${check} check: ${failure.reason}${run.error ? `; the provider run also failed (${run.error.code})` : ''}` };
     artifacts = emptyArtifactInventory();
   }
   if (!integrityFailure) {
-    run = sanitizeProducerRun(run);
+    run = sanitizeProducerRun(run, sourceCredentials);
     if(!run.error&&!run.output.trim())run={...run,error:{code:'unknown',reason:'empty output from provider CLI (exit 0)'}};
   }
   const tokensReported = run.tokens.input > 0 || run.tokens.output > 0 || (run.tokens.cached ?? 0) > 0;

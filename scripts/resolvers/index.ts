@@ -32,6 +32,7 @@ import { generateScopeDrift, generateCrossReviewDedup, generateSharedCodeReuse }
 import { generateSlugEval, generateSlugSetup, generateBaseBranchDetect, generateDeployBootstrap, generateQAMethodology, generateCoAuthorTrailer, generateChangelogWorkflow, generateCodexWebSearchFlag, generateCodexModelConfigFlag, generateCodexReviewModelConfigFlag, generateClaudeModelFlag, generateSetupCommand } from './utility';
 import { generateLearningsSearch, generateLearningsLog } from './learnings';
 import { generateConfidenceCalibration } from './confidence';
+import { generateGateScanBlock } from './gate-scan';
 import { generateInvokeSkill, generateAutoplanReviewFile, generateAutoplanSnapshotTool, generateAutoplanPublicationHook, generateCeoModeHandoffHook } from './composition';
 import { generateReviewArmy } from './review-army';
 import { generateDxFramework } from './dx';
@@ -47,6 +48,10 @@ import { generateCommandReference, generateSnapshotFlags, generateBrowseSetup, g
 import { generateDesignDocDiscovery } from './design-doc-discovery';
 import { generateSharedLibsRubric, generateSafeGitPath } from './shared-libs';
 import { generateTestValueBar, generateTestValueMessage } from './test-value';
+import { generateImplementerDispatchRules } from './dispatch-rules';
+import { generatePlanRealityRows } from './plan-reality';
+import { generateSidewaysSweep, generateFlakeFixNumber } from './sideways';
+import { generateCoordinatorContract } from './coordinator-contract';
 import { generateQAScope, generateQAExploratory, generateQAFunctional, generateQAResource, generateQAReview, generateQAReviewPreflight, generateQAMethodReads } from './qa';
 
 export const RESOLVERS: Record<string, ResolverFn> = {
@@ -60,12 +65,13 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   HOST_ID: (ctx) => ctx.host,
   OUTSIDE_PREFLIGHT: (ctx, args) => outsideVoicePreflight(ctx, { disabledBehavior: args?.[0] === 'opt-in' ? 'opt-in' : 'codex-only', ...(args?.[0] === 'autoplan' || args?.[1] === 'plan-review' ? { role: 'plan-review' as const } : {}) }),
   // Owner (2026-09-06): the /spec quality gate runs at xhigh on the 540s budget
-  // (upstream: medium / 120000); its template sets the 600000 ms outer gate.
-  // Owner (2026-10-02, v1.91.12 merge): autoplan phases follow the same rule — xhigh on the 540s budget,
-  // outer gate 600000 ms. Upstream also uses 540000 for the non-spec path (still `high`) and
-  // outsideVoiceInvocation derives the 600000 ms gate from the budget itself (#2776).
-  // v1.91.68 merge: upstream added the plan-review role selector; it is kept as is.
-  OUTSIDE_INVOCATION: (ctx, args) => outsideVoiceInvocation(ctx, { timeoutMs: 540000, gate: args?.[0] === 'spec' ? 'spec' : 'review', reasoningEffort: 'xhigh', ...(args?.[0] === 'autoplan' || args?.[0] === 'spec' ? { role: 'plan-review' as const } : {}) }),
+  // (upstream: medium / 120000); its template sets the 600000 ms outer gate. Upstream pins
+  // the /spec effort (codex_effort cannot reach it), so this is the one effort still pinned here.
+  // v1.91.95 merge (2026-10-13): every other gate passes upstream's default (`high`) to
+  // `run-with-timeout --effort`; this install raises it with `gstack-config set codex_effort xhigh`.
+  // Upstream also uses 540000 for the non-spec path and outsideVoiceInvocation derives the
+  // 600000 ms gate from the budget itself (#2776). The plan-review role selector is upstream's.
+  OUTSIDE_INVOCATION: (ctx, args) => outsideVoiceInvocation(ctx, { timeoutMs: 540000, gate: args?.[0] === 'spec' ? 'spec' : 'review', reasoningEffort: args?.[0] === 'spec' ? 'xhigh' : 'high', ...(args?.[0] === 'autoplan' || args?.[0] === 'spec' ? { role: 'plan-review' as const } : {}) }),
   OUTSIDE_PROVENANCE: (ctx, args) => outsideVoiceProvenance(ctx, args?.[0] ?? ctx.skillName),
   SLUG_EVAL: generateSlugEval,
   SLUG_SETUP: generateSlugSetup,
@@ -121,6 +127,7 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   TEST_COVERAGE_GATE_SHIP: generateTestCoverageGateShip,
   TEST_VALUE_BAR: generateTestValueBar,
   TEST_VALUE_MESSAGE: generateTestValueMessage,
+  IMPLEMENTER_DISPATCH_RULES: generateImplementerDispatchRules,
   TEST_FAILURE_TRIAGE: generateTestFailureTriage,
   SPEC_REVIEW_LOOP: generateSpecReviewLoop,
   DESIGN_SKETCH: generateDesignSketch,
@@ -140,11 +147,15 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   PLAN_COMPLETION_GATE_SHIP: generatePlanCompletionGateShip,
   PLAN_COMPLETION_AUDIT_REVIEW: generatePlanCompletionAuditReview,
   PLAN_VERIFICATION_EXEC: generatePlanVerificationExec,
+  PLAN_REALITY_ROWS: generatePlanRealityRows,
+  SIDEWAYS_SWEEP: generateSidewaysSweep,
+  FLAKE_FIX_NUMBER: generateFlakeFixNumber,
   CO_AUTHOR_TRAILER: generateCoAuthorTrailer,
   SETUP_COMMAND: generateSetupCommand,
   LEARNINGS_SEARCH: generateLearningsSearch,
   LEARNINGS_LOG: generateLearningsLog,
   CONFIDENCE_CALIBRATION: generateConfidenceCalibration,
+  GATE_SCAN_BLOCK: generateGateScanBlock,
   INVOKE_SKILL: generateInvokeSkill,
   AUTOPLAN_REVIEW_FILE: generateAutoplanReviewFile,
   AUTOPLAN_SNAPSHOT_TOOL: generateAutoplanSnapshotTool,
@@ -171,6 +182,7 @@ export const RESOLVERS: Record<string, ResolverFn> = {
   BRAIN_WRITE_BACK: generateBrainWriteBack,
   TASKS_SECTION_EMIT: generateTasksSectionEmit,
   TASKS_SECTION_AGGREGATE: generateTasksSectionAggregate,
+  COORDINATOR_CONTRACT: generateCoordinatorContract,
   SECTION,
   SECTION_INDEX,
 };

@@ -14,7 +14,7 @@ export function generateDesignReviewLite(ctx: TemplateContext): string {
   // Each supported host uses its selected outside reviewer.
   const codexBlock = `
 
-6. **${outsideVoiceFor(ctx).label} design voice** (optional, automatic if available):
+6. **${outsideVoiceFor(ctx).label} design voice** (optional; runs when available and \`codex_reviews\` allows it):
 
 ${outsideVoicePreflight(ctx, { disabledBehavior: 'opt-in' })}
 
@@ -674,10 +674,10 @@ If ${outsideVoiceFor(ctx).label} is available, use AskUserQuestion:
 
 If user chooses A, run both independent voices below and wait for both results before synthesis. They may overlap when the host supports parallel tool calls; the native subagent call remains blocking.
 
-1. **${outsideVoiceFor(ctx).label}** (via Bash, \`model_reasoning_effort="xhigh"\`):
+1. **${outsideVoiceFor(ctx).label}** (via Bash, \`model_reasoning_effort="medium"\`):
 Prompt: "For this product approach, provide: a visual thesis (one sentence — mood, material, energy), a content plan (hero → support → detail → CTA), and 2 interaction ideas that change page feel. Apply beautiful defaults: composition-first, brand-first, cardless, poster not document. Be opinionated." Include the approved product approach and wireframe source in the prepared prompt.
 
-${outsideVoiceInvocation(ctx, { timeoutMs: 540000, reasoningEffort: 'xhigh', purpose: 'design-direction' })}
+${outsideVoiceInvocation(ctx, { timeoutMs: 540000, reasoningEffort: 'medium', purpose: 'design-direction' })}
 
 Set the outer tool timeout to 600000ms so the provider timeout can report its failure.
 
@@ -699,9 +699,9 @@ export function generateDesignOutsideVoices(ctx: TemplateContext): string {
   const isDesignReview = ctx.skillName === 'design-review';
   const isDesignConsultation = ctx.skillName === 'design-consultation';
 
-  // Determine opt-in behavior and reasoning effort
-  const isAutomatic = isDesignReview; // design-review runs automatically
-  const reasoningEffort = 'xhigh'; // 2026-09-06: unified (was: isDesignConsultation ? 'medium' : 'high')
+  // design-review asks no question; codex_reviews (enforced by the send) is its consent
+  const isAutomatic = isDesignReview;
+  const reasoningEffort = isDesignConsultation ? 'medium' : 'high'; // creative vs analytical
 
   // Build the skill-specific outside-review prompt.
   let codexPrompt: string;
@@ -789,7 +789,7 @@ Be bold and specific.`;
 
   // Build the opt-in section
   const optInSection = isAutomatic ? `
-**Automatic:** Outside voices run automatically when ${outsideVoiceFor(ctx).label} is available. No opt-in needed.` : `
+**Consent:** Outside voices run without a question when ${outsideVoiceFor(ctx).label} is available and \`codex_reviews\` allows the send (unset means the default, enabled; the first send prints a one-time notice). \`codex_reviews=disabled\` runs only the native voice.` : `
 Use AskUserQuestion:
 > "Want outside design voices${isPlanDesignReview ? ' before the detailed review' : ''}? ${outsideVoiceFor(ctx).label} ${isDesignConsultation ? 'proposes an independent design direction' : "evaluates against OpenAI's design hard rules + litmus checks"}; ${outsideVoiceFor(ctx).nativeLabel} subagent does an independent ${isDesignConsultation ? 'design direction proposal' : 'completeness review'}."
 >
@@ -845,9 +845,9 @@ printf 'DESIGN_BRIEF=%s\\n' "$_DESIGN_BRIEF"
 Write the product brief to that path; remember its absolute path across fresh Bash calls. Neither voice inherits context: give both the same brief. Include its complete contents in the outside prompt file for Codex, along with the design-direction request below; substitute its shell-quoted absolute path for the literal <prepared-prompt-file> in the invocation. Keep your draft direction out of both prompts; give the native Agent its absolute path (the product brief's path, not the Codex prompt file). Never paste brief text into shell source.` : ''}
 
 **Check ${outsideVoiceFor(ctx).label} availability:**
-${outsideVoicePreflight(ctx, { disabledBehavior: 'opt-in', acceptedOnly: isDesignConsultation, ...(isPlanDesignReview ? { role: 'plan-review' as const } : {}) })}
+${outsideVoicePreflight(ctx, { disabledBehavior: 'opt-in', ...(isPlanDesignReview ? { role: 'plan-review' as const } : {}) })}
 
-${isDesignConsultation ? 'Non-ready CLI: retain its repair notice and use only the native voice. The invocation deliberately rechecks the harness before spawning; native success never replaces external coverage.' : 'Declined: skip both voices. Non-ready: retain the repair notice, use only the native voice, and record `outside_status: unavailable` even if it succeeds. The invocation rechecks the harness before spawning.'}
+${isDesignConsultation ? '`CODEX_MODE: disabled` or a non-ready CLI: retain any repair notice and use only the native voice. The invocation deliberately rechecks the harness before spawning; native success never replaces external coverage.' : 'Declined: skip both voices. `CODEX_MODE: disabled`: run only the native voice and record `outside_status: disabled`. Non-ready: retain the repair notice, use only the native voice, and record `outside_status: unavailable` even if it succeeds. The invocation rechecks the harness before spawning.'}
 
 **When ready**, run both voices and await both before synthesis. Overlap calls
 if supported; keep the native call blocking.
