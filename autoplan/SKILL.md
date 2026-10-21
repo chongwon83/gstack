@@ -32,19 +32,6 @@ hooks:
 <!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->
 <!-- Regenerate: bun run gen:skill-docs -->
 
-
-## When to invoke this skill
-
-Surfaces
-taste decisions (close approaches, borderline scope, outside-review disagreements) at a final
-approval gate. One command, fully reviewed plan out.
-Use when asked to "auto review", "autoplan", "run all reviews", "review this plan
-automatically", or "make the decisions for me".
-Proactively suggest when the user has a plan file and wants to run the full review
-gauntlet without answering 15-30 intermediate questions.
-
-Voice triggers (speech-to-text aliases): "auto plan", "automatic review".
-
 ## Preamble (run first)
 
 ```bash
@@ -676,7 +663,7 @@ Send phase announcements and the final approval request (the brief) in the conve
 Resolve SNAPSHOT_TOOL once:
 ```bash
 
-bun -e 'console.log(require("fs").realpathSync(process.argv[1]))' "$HOME/.claude/skills/gstack/bin/gstack-autoplan-snapshot.ts"
+bun --no-env-file --config=/dev/null -e 'console.log(require("fs").realpathSync(process.argv[1]))' "$HOME/.claude/skills/gstack/bin/gstack-autoplan-snapshot.ts"
 ```
 
 Fresh RESTORE_PATH, beside its phase artifacts in the git-excluded `.gstack/tmp/autoplan/`:
@@ -707,14 +694,12 @@ Re-run: copy RESTORE_PATH's bytes to SOURCE_PLAN, then /autoplan.
 
 - Read CLAUDE.md, TODOS.md, git log -30, git diff against the base branch --stat
 - Discover design docs: `~/.claude/skills/gstack/bin/gstack-design-doc-find "$SLUG" "$BRANCH"` (prints the doc path, or nothing)
-- Detect UI scope: grep the plan for view/rendering terms (component, screen, form,
-  button, modal, layout, dashboard, sidebar, nav, dialog). Require 2+ matches, excluding
-  false positives ("page" alone, "UI" in acronyms).
 - Use init's full-input `scope`. For changed input or semantic enabling flags, rerun:
 ```bash
 bun "<SNAPSHOT_TOOL>" scope "<ACTIVE_PLAN>"
 ```
-  Use returned `dxRequired` (initially `scope.dxRequired`); record its input hash and matched
+  UI scope is returned `uiRequired`: a rendered file path or a UI term next to a visual
+  noun (`uiEvidence`); bare UI words never add Design. Use returned `dxRequired` (initially `scope.dxRequired`); record its input hash and matched
   terms. The threshold is 2+ term matches (occurrences, not distinct terms). Also enable DX when the
   product is a developer tool (developers install, integrate or build on it) or an AI agent is
   the primary user: add `--developer-tool` or `--agent-primary`. These flags only enable DX; no
@@ -971,7 +956,7 @@ If Phase 2 ran (UI scope):
 
 If Phase 2.5 ran (DX scope):
 ```bash
-~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"plan-devex-review","timestamp":"'"$TIMESTAMP"'","status":"STATUS","initial_score":N,"overall_score":N,"product_type":"TYPE","tthw_current":"TTHW","tthw_target":"TARGET","unresolved":N,"via":"autoplan","commit":"'"$COMMIT"'"}'
+~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"plan-devex-review","timestamp":"'"$TIMESTAMP"'","status":"STATUS","initial_score":N,"overall_score":N,"product_type":"TYPE","tthw_current":"TTHW","tthw_target":"TARGET","unresolved":N,"dx_rubric":"agent-ready-v1","via":"autoplan","commit":"'"$COMMIT"'"}'
 ```
 
 Dual voice logs: one record per PHASE (`ceo`, `design`, `dx`, `eng`) with that
