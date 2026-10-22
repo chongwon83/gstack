@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.91.176.0] - 2026-10-21
+
+**A qualified /cso runtime set can be released again after the S1 shebang change.** The release contract fingerprints every source byte compiled into a runtime image (`preparationSha256`). S1 (#3312) changed only line 1 of the two compiled helpers, `lib/cso/verifier.ts` and `lib/cso/preparation-container.ts`, from `#!/usr/bin/env bun` to the isolated shebang. That line is embedded in the compiled binary as an unused string and never runs in the image, but it moved the fingerprint. Qualify run 39535948607 therefore refused the run-5 statements, staged at 133cb36, with `STALE_RUNTIME_QUALIFICATION: preparationSha256`. Garry chose this narrow rule change over a re-stage and a fresh paid qualification (2026-10-21, option 2).
+
+### Changed
+- **`scripts/cso-requalification.ts`**: `preparationSha256` hashes a compiled helper entrypoint's leading `#!` line as absent. Every other byte of the helpers, and every byte of every other image source including its shebang lines, still counts. 133cb36 and main both measure `c721b585…`.
+- **`scripts/cso-runtime-promotion.ts`** (`releaseCandidate`): when the staging record's `preparationSha256` differs from the checkout's, the release contract re-measures it at the staged commit from git history. The record must match that commit under the current rule or the earlier one, which also hashed the shebangs; otherwise it fails with `REQUALIFICATION_TRIGGERS_MISMATCH`. The current-rule value is compared and recorded, so both sides use the same rule.
+- **`cso-runtime-qualification.yml`, `cso-runtime-promote.yml`**: check out full history so the staged commit is readable.
+
+### Gate integrity
+- Gate edit, a narrowing with Garry's approval: the release contract's `preparationSha256` comparison ignores the leading `#!` line of the two compiled helpers on both sides. Nothing else gets a pass. `test/cso-runtime-promotion.test.ts` runs the contract on the real 133cb36 record (`b069f7ef…`) against a main tree. These still fail with `STALE_RUNTIME_QUALIFICATION`: a line-2 edit to either helper, an image Dockerfile edit, and a shebang edit to the image `entrypoint`. A record that matches neither rule at the staged commit fails with `REQUALIFICATION_TRIGGERS_MISMATCH`.
+
+## [1.91.175.0] - 2026-10-21
+
+**A free-suite flake now keeps the assertion that failed.** Four free-test flakes in the flaky ledger (plan-seed-submission, native-paste, qa-only preparation-late and the gstack-upgrade fresh-shell positive control) could not be diagnosed: each failed once on a Ubicloud or remote-pregate run, passed on the serial retry, and its log died with the machine that pulled it. The runner's console printed only the failing test's name, and the flake ledger recorded only the file.
+
+### Changed
+- **`scripts/test-free-shards.ts`**: the result reporter keeps the error bun printed before each `(fail)` line: from its first `error:` line, without blanks or CI annotations, at most 8 lines of 240 characters. The FAIL epilogue prints that excerpt under each `✗ <file> — <test>` line, so it reaches the console stream that remote pregates relay. A FLAKY-PASS ledger entry now records `tests: [{ name, excerpt }]` for each file. Existing ledger readers ignore the new field. Verdicts, retries and their cap are unchanged.
+
+### Tests
+- `test/test-free-shards.test.ts` replays the Windows team-init PowerShell failure as bun printed it (run 39448730953, attempt 1) and checks the excerpt and the epilogue. The real CLI flaky-retry routes (`retry-reader`, `retry-exclusive`) now check that the ledger entry names the failed test with `Expected: 2` / `Received: 1`.
+
+## [1.91.174.0] - 2026-10-21
+
+**Two paid eval flakes from the 2026-10-20 trains are repaired at their cause, with no threshold, trial count or case kind changed.** ship-local-hook-preservation failed in train gate 39440559183 even though the agent told the user "you'll need to set it up by hand": the manual-integration detector knew "set up" and "wire in" only with the particle right after the verb. ship-docsync-current lost a focused trial to an unquoted `grep … --include=*`, which the shared read-only grammar refuses on purpose because the shell expands the glob first; the grammar's declared interface said "unquoted glob matches included" and never said that an option's glob has to be quoted.
+
+### Fixed
+- **`test/helpers/ship-hook-actor.ts`**: the manual-integration sentence now accepts a pronoun object inside the phrasal verb (`set it up`, `set both up`, `wire them in`). The rest of the rule is unchanged: the sentence still needs "yourself", or "by hand" plus an addressee.
+- **`test/helpers/read-only-commands.ts`**: the declared interface now says that an unquoted glob may stand only as a path operand, and shows the quoted option form (`--include='*.md'`, `-name '*.md'`). A refused globbed option names the quoted form in its reason (`globbed option: --include=*; quote the glob: --include='*'`). The grammar accepts and refuses exactly the same commands as before.
+
+### Gate integrity
+- Gate edit: the ship-local-hook-preservation detector (above). `test/ship-hook-actor.test.ts` replays all 8 Opus 5.5 train and backstop gate replies for the case (`test/fixtures/ship-local-hook-train-replies.json`, runs 39363705692–39515353585). Without the fix, the 39440559183 reply fails. New negative controls keep these refused: a first-person "I set it up by hand", a passive "It was set up by hand", "Whoever … needs to work out how to combine them" (no by-hand step), and "I wired them in myself".
+- No grammar acceptance change. `test/read-only-command-grammar.test.ts` replays the captured `--include=*` command: it is still refused, its reason names the quoted form, the docsync interface carries the new sentence, and the quoted form and both examples are accepted.
+
 ## [1.91.173.0] - 2026-10-20
 
 **Merge trains can merge slot 2 onward.** After slot 1 merges, main carries the new stamp, so every later pin conflicts with main on the stamp files and GitHub can't squash it. A lane makes its PR mergeable by merging main into the pin before it stamps. `verify --pr <n> --train <nonce>` refused that head as moved off its pin. Now it also accepts a head whose tree equals the slot's train prefix (T<i>) modulo stamps: exactly the tree the train's gate covered, and what main becomes once the PR squash-merges. The first live train stopped at slot 2 on this (gate.train-ac4baf961759-43d6ed28f2bf-9a1dbb). Plan GSTA-49.
