@@ -51,6 +51,8 @@ const WINDOWS_FRAGILE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 // when possible; this list is for environment-/runtime-specific tests where
 // the failure mode is structural rather than detectable via source-file scan.
 export const KNOWN_WINDOWS_INCOMPATIBLE: Array<{ file: string; reason: string }> = [
+  // Like test/paid-rerun.test.ts (excluded by pattern), it replays a gate capture through the paid lane's --report and --rerun-plan CLI.
+  { file: 'test/credential-rejection.test.ts', reason: 'replays run 39696775546 through the --report and --rerun-plan CLI of the paid lane, which runs only on Linux CI; on windows-latest that CLI exits 1 with EINVAL in open() (windows-free-shard run 39982914852)' },
   // Field list 2, W11: the review-voice install is a POSIX launcher contract, exercised end to end on Linux and macOS.
   { file: 'test/capy-review-voice.test.ts', reason: 'copies the checkout with tar -C into the temp root (GNU tar reads a D: path as a remote host) and launches the bash --for review-voice installer with a colon-joined GSTACK_LAUNCH PATH' },
   // C-pregate. Since fix wave PR 5 (item 10b) test/helpers/pregate-fixture.ts and restamp-fixture.ts
@@ -312,6 +314,7 @@ export const KNOWN_WINDOWS_SAFE: Array<{ file: string; reason: string }> = [
   { file: 'test/ship-hook-windows-paths.test.ts', reason: 'runs bin/ helpers through explicit bash and Bun argv with forward-slash paths; never executes a shebang; the path-spelling simulation is skipIf win32' },
   { file: 'test/gstack-wtree-windows-paths.test.ts', reason: '#3101: runs bin/gstack-wtree through explicit bash in an os.tmpdir linked worktree with forward-slash paths; never executes a shebang; the drive-letter simulation is skipIf win32' },
   { file: 'test/setup-hook-syntax-gate.test.ts', reason: '#3088/#3100: runs bin/gstack-hook-check and the setup hook sections through explicit bash with forward-slash paths; never executes a shebang. Its Bun drive-path spelling is the Windows bug it guards' },
+  { file: 'test/bun-config-shell-bins.test.ts', reason: '#3415: runs the record bins through lib/script-invocation.ts (Git Bash on Windows) with MSYS path conversion off, the case it guards; its bun and cygpath stand-ins and simulated-OSTYPE cases are skipIf win32' },
   { file: 'test/path-spelling.test.ts', reason: 'sources bin/gstack-path-spelling.sh through explicit bash and checks lib/path-spelling.ts; on Windows it exercises the real Git Bash spellings' },
   { file: 'test/state-root-parity.test.ts', reason: 'runs the bash twin and lib/state-root.ts over an env table with PATH empty; no shebang execution, raw-string comparison is platform-neutral' },
   { file: 'test/generator-eexist.test.ts',
