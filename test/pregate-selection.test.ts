@@ -11,9 +11,10 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { EXIT } from '../lib/headless-artifacts';
-import { changedLiterals, constantsIn } from '../lib/pregate/checks/literals';
+import { changedLiterals, constantsIn, consumersOf } from '../lib/pregate/checks/literals';
 import { parseSummary, planRuns } from '../lib/pregate/checks/lanes';
 import { DEFAULT_CONFIG, validateConfig } from '../lib/pregate/config';
 import { isDocsEmptyLane } from '../lib/pregate/docs-lane';
@@ -200,6 +201,28 @@ describe('literals (pure)', () => {
       { name: 'MAX', old: '3', new: '4', file: 'f.ts' }, { name: 'timeout', old: '5000', new: '9000', file: 'f.ts' },
     ]);
   });
+  test('consumersOf: a module stem is a path fragment, never a bare word, and a one-character old value needs the constant name (GSTA-114 flood: install.sh 2 -> 3 flagged 575 consumers)', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-literals-'));
+    const nl = String.fromCharCode(10);
+    const files: Record<string, string> = {
+      'test/wrapper.test.ts': ["import { x } from '../capy/skill/gstack/scripts/install.sh';", 'expect(GSTACK_CAPY_WRAPPER).toBe(2);', ''].join(nl),
+      'test/by-path.test.ts': ["const out = run('scripts/install.sh');", 'expect(out.wrapper).toBe(2);', ''].join(nl),
+      'test/prose.test.ts': ['// run install first, then check 2 things', 'expect(count).toBe(2);', ''].join(nl),
+      'test/other.test.ts': ['expect(install.steps.length).toBe(2);', ''].join(nl),
+      'test/retry.test.ts': ["expect(require('../lib/retry.js').TIMEOUT_MS).toBe(5000);", ''].join(nl),
+      'test/retry-path.test.ts': ["const mod = require('../lib/retry.js');", 'expect(mod.wait()).toBe(5000);', ''].join(nl),
+      'test/retry-bare.test.ts': ["const mod = load('retry.js');", 'expect(mod.wait()).toBe(5000);', ''].join(nl),
+      'test/reretry.test.ts': ["const mod = load('preretry.js');", 'expect(mod.wait()).toBe(5000);', ''].join(nl),
+      'test/retry-words.test.ts': ['// the retry budget was 5000 once', 'expect(elapsed).toBeLessThan(5000);', ''].join(nl),
+    };
+    for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); }
+    const all = Object.keys(files);
+    // A one-character value: only the file that names the constant counts; the path fragment alone is not enough for "2".
+    expect(consumersOf(root, all, { name: 'GSTACK_CAPY_WRAPPER', old: '2', new: '3', file: 'capy/skill/gstack/scripts/install.sh' })).toEqual(['test/wrapper.test.ts:2']);
+    // A longer value: the constant's name, the module's full file name, or its stem as a path fragment; the bare word "retry" in prose and "preretry.js" do not count.
+    expect(consumersOf(root, all, { name: 'TIMEOUT_MS', old: '5000', new: '9000', file: 'lib/retry.js' })).toEqual(['test/retry.test.ts:1', 'test/retry-path.test.ts:2', 'test/retry-bare.test.ts:2']);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   test('runner summaries: bun, node --test, vitest, jest, pytest, zero-run', () => {
     expect(parseSummary(' 12 pass\n 1 fail\nRan 13 tests across 2 files.')).toEqual({ ran: 13, failed: 1 });
     expect(parseSummary('# tests 4\n# pass 4\n# fail 0')).toEqual({ ran: 4, failed: 0 });
@@ -372,6 +395,7 @@ describe('gstack-pregate (bin)', () => {
     const ok = pregate(docs, ['--only', 'lanes', '--explain']);
     expect(ok.status).toBe(EXIT.ok);
     expect(ok.err).not.toContain('PREGATE_NO_LANE');
+    expect(ok.out).not.toContain('PREGATE_NO_POLICY');
     expect(ok.out).toMatch(/docs\/no-tests: 3 documentation file\(s\)/);
     expect(ok.out).toContain('.work/round-3-plan.md: docs/no-tests (empty lane)');
     expect(ok.out).toContain('notes/redproof.md: docs/no-tests (empty lane)');
@@ -383,10 +407,12 @@ describe('gstack-pregate (bin)', () => {
       '.work/round-3-plan.md': '# plan\n',
       'lib/orphan.js': 'exports.lonely = () => 2;\n',
     });
+    // With no policy anywhere the unmapped source file is the PREGATE_NO_POLICY warning with a starter (Lane D), still never a pass, and the Markdown stays docs.
     const bad = pregate(mixed, ['--only', 'lanes']);
-    expect(bad.status).toBe(EXIT.fail);
-    expect(bad.err).toContain('(PREGATE_NO_LANE)');
-    expect(bad.out).toContain('lanes: FAIL lanes — lib/orphan.js has no test lane');
+    expect(bad.status).toBe(EXIT.ok);
+    expect(bad.err).not.toContain('PREGATE_NO_LANE');
+    expect(bad.out).toContain('(PREGATE_NO_POLICY)');
+    expect(bad.out).toContain('lanes: no policy: lib/orphan.js have no test lane');
     expect(bad.out).toContain('docs/no-tests (empty lane): .work/round-3-plan.md');
     expect(bad.out).not.toContain('.work/round-3-plan.md has no test lane');
 
@@ -467,6 +493,45 @@ describe('gstack-pregate (bin)', () => {
     expect(head.status).toBe(EXIT.ok);
     expect(head.out).toContain('policy head (unreviewed) .gstack/pregate.json');
     expect(head.out).toMatch(/^tests {6}lanes {5}pass /m);
+  });
+
+  // Value: protects=a branch that adds its own lane in .gstack/pregate.json and fails PREGATE_NO_LANE under the base policy is told why (the base
+  // copy is the policy) and given both routes, while the base policy still decides; fails_when=the fix line repeats "declare its lane" with no
+  // mention of the base policy, or the run silently reads the head policy and passes; why_new=the circular fix line from gstack-evals #6/#15;
+  // seam=fixture repo; no_claim=ship-queue's handling of a head-policy record
+  test('lanes: a branch whose own pregate.json adds the lane still fails under the base policy, and the fix names the base copy and --policy-from head', () => {
+    const repo = fixture();
+    commit(repo, { 'lib/orphan.js': "exports.lonely = () => 2;\n" });
+    const plain = pregate(repo, ['--stage', 'tests']);
+    expect(plain.status).toBe(EXIT.fail);
+    expect(check(repo, 'lanes').fix).not.toContain('--policy-from head');
+    commit(repo, { '.gstack/pregate.json': JSON.stringify({ ...BASE_PREGATE, dependencies: { ...BASE_PREGATE.dependencies, 'lib/orphan.js': ['test/util.test.js'] } }) + '\n' });
+    const r = pregate(repo, ['--stage', 'tests']);
+    expect(r.status).toBe(EXIT.fail);
+    expect(r.err).toContain('(PREGATE_NO_LANE)');
+    const fix: string = check(repo, 'lanes').fix;
+    expect(fix).toMatch(/^this branch edits \.gstack\/pregate\.json, but the policy comes from origin\/main@[0-9a-f]{12}:\.gstack\/pregate\.json so a branch cannot loosen its own gate/);
+    expect(fix).toContain('land the policy change in its own PR first, or rerun with --policy-from head --allow-repo-commands');
+    expect(fix).toContain('otherwise add a test that names the file');
+  });
+
+  // Value: protects=the own-policy fix line appears only when the base or user copy decides and the branch still carries its own
+  // pregate.json: a --policy-from head run and a branch that deletes the file get the plain fix; fails_when=the configKind 'head' guard or
+  // the status 'D' filter in noLaneFix is dropped; why_new=the head run above passes and never reaches noLaneFix, and no test deletes the
+  // pin file on a NO_LANE run; seam=fixture repo; no_claim=the wording of the plain fix
+  test('lanes: a head-policy run and a branch that deletes pregate.json get the plain no-lane fix', () => {
+    const repo = fixture();
+    commit(repo, { 'lib/orphan.js': "exports.lonely = () => 2;\n", '.gstack/pregate.json': JSON.stringify({ ...BASE_PREGATE, dependencies: { ...BASE_PREGATE.dependencies, 'lib/orphan.js': ['test/util.test.js'] } }) + '\n' });
+    commit(repo, { 'lib/orphan2.js': "exports.alone = () => 3;\n" });
+    const head = pregate(repo, ['--stage', 'tests', '--policy-from', 'head']);
+    expect(head.status).toBe(EXIT.fail);
+    expect(head.err).toContain('(PREGATE_NO_LANE)');
+    expect(check(repo, 'lanes').fix).toMatch(/^add a test that names the file/);
+    commit(repo, { '.gstack/pregate.json': null });
+    const deleted = pregate(repo, ['--stage', 'tests']);
+    expect(deleted.status).toBe(EXIT.fail);
+    expect(deleted.err).toContain('(PREGATE_NO_LANE)');
+    expect(check(repo, 'lanes').fix).toMatch(/^add a test that names the file/);
   });
 
   test('lanes: deleted and renamed files select the tests that named them; subprocess targets and computed reads map through declarations and joined literals', () => {

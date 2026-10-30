@@ -6,17 +6,18 @@ Read this file instead of `autoplan/SKILL.md` when you (a parent agent on any ho
 unattended /autoplan run through `gstack-autoplan`: the reviewers are subagents you dispatch,
 and the runner keeps the state. The commands live in `<root>/bin/`, where `<root>` is the
 folder that holds this `autoplan/` directory; `gstack-autoplan --help` and the first `next`
-print `DRIVER: <root>/autoplan/DRIVER.md`. Run every command with the `GSTACK_LAUNCH`
-assignments your installer printed. Read printed lines and files, never prose: every workflow
+print `DRIVER: <root>/autoplan/DRIVER.md`. Run every command with the `GSTACK_LAUNCH` assignments your installer printed: `. <the GSTACK_LAUNCH_FILE it printed>` in the shell that runs the command,
+never `export $(...)`, `env`, `printenv` or a bare `set` in a tool fence (a bare `export` prints every variable, credentials included). Read printed lines and files, never prose: every workflow
 command ends with `GSTACK_RESULT: skill=autoplan status=<s> run=<dir>`, and every error line
 ends with `(<CODE>)`.
 
 ## Phases and scope
 
 Order: ceo → design → dx → eng. Design runs only with UI scope, DX only with DX scope, Eng always and last.
-Scope flags on the first `next`: `--ui`, `--no-ui`, `--no-dx`, `--developer-tool`, `--agent-primary`. `--developer-tool` and `--agent-primary` only enable DX.
-The first `next` prints `SCOPE: ui=… (terms; visual; files) dx=… (detected) source=ui:<s>,dx:<s>`
-(each axis is `flag`, `marker` or `detected`). UI needs a rendered file path or a UI term next
+Scope flags on the first `next`: `--ui`, `--no-ui`, `--no-dx`, `--developer-tool`, `--agent-primary`, `--docs-only`. `--developer-tool` and `--agent-primary` only enable DX.
+The first `next` prints `SCOPE: ui=… (terms; visual; files) dx=… (detected) docs_only=yes|no (<s>) source=ui:<s>,dx:<s>`
+(each is `flag`, `marker` or `detected`). Docs-only (`--docs-only`, or every Implementation-plan path is README*, CHANGELOG*,
+TODOS*, docs/** but not docs/*-policy.md, or other markdown outside a skill dir) runs CEO on the native voice only, then Eng. UI needs a rendered file path or a UI term next
 to a visual noun in the Implementation plan. To keep flags for later runs on the same plan, add
 the `SCOPE_PIN:` marker it prints (`<!-- gstack-autoplan-scope: … -->`) as the plan's first
 line yourself; gstack never writes the plan.
@@ -25,18 +26,19 @@ line yourself; gstack never writes the plan.
 
 1. `next` prints one `ATTEMPT: <id> phase=<p> voice=native|outside prompt=<file> result=<file>`
    per voice. Dispatch the native prompt to a subagent on your model and the outside prompt to
-   a subagent on another model family (or `gstack-outside-voice run`). Each writes `result=`.
+   a subagent on another model family (or `gstack-outside-voice run`). Each writes `result=`. The first `next` also prints `REVIEW_ESTIMATE:` (most attempts and reservations the review can take).
 2. Submit each voice exactly once (`BOUND:`). Both voices in closes the phase (`PHASE_CLOSED:`).
-3. Repeat `next` until `status=gate_pending` (`GATE: gate_rev=<n>`); render it with
-   `gstack-gate render <dir>/gate.json --all` and relay every page. You never approve the
-   gate for the owner. Offer `rec` (every recommendation, plan changes included) as the default.
-4. `answer` with the owner's reply and `--by human` (the owner typed the tokens) or
-   `--by agent:<id> --owner-reply "<their words>"` (you relayed them); without `--by` an
+3. Repeat `next` until `status=gate_pending` (`GATE: gate_rev=<n>`); render it with `gstack-gate render <dir>/gate.json --all` and relay every page with the two cost lines printed under `GATE:`: `GATE_SPEND:` (spent, worst case, cap, headroom, attempts; host-subagent attempts are priced unknown and counted at their reservation, so quote their real figure from the host's cost view) and `GATE_REC_COST:` (the phases `rec` can reopen and the estimate for them, an upper bound; `gate_cost` in `--json`).
+   You never approve the gate for the owner. Offer `rec` (every recommendation, plan changes included) as the default.
+4. `answer` with the owner's reply and `--by human` (the owner typed the tokens) or `--by agent:<id> --owner-reply "<their words>"` (you relayed them); without `--by` an
    unattended run refuses (`ANSWER_BY_REQUIRED`). `APPLY: <id> <title> -> <change>` lines are
    accepted plan changes (status `amend_pending`): edit the plan, then `revise` (the printed
    `NEXT:` names it), or `revise --settle <id>` when the line says no plan edit is needed. Until
    then `next` refuses with `PLAN_AMEND_PENDING` and `export` will not mark the run complete.
-5. `REOPENED: <phases>` means loop `next` again (Eng last). `APPROVED:` means `export`.
+5. `REOPENED: <phases>` means loop `next` again (Eng last). `APPROVED:` means `export` (`DISPATCHES: <n> est_input_tokens=<k>`, relative).
+6. Rounds: one by default; a second only for High or Critical findings; cap 2 (`--max-rounds`). A `revise` whose decisions all resolve below
+   High prints `APPLIED: <ids> without re-review (below High)`. At the cap with High open, `ESCALATE: evidence sufficient, decision needed`: relay it, never ask for another round.
+7. Carry-forward ([docs/unattended.md#carry-forward](../docs/unattended.md#carry-forward); `--no-carry-forward` on the first `next` opts out): a later gate that asks nothing new takes the owner's words from the gate before it (`CARRIED:`, then `APPROVED:`); `CARRY: no (<why>)` leaves it for the owner; `CARRY_CHECK:` means one reviewer from another model family reads the printed delta prompt, then `check --out <dir> --attempt <id> --result <file> --model <id>` (or `--unavailable "<reason>"`).
 
 ### On Capy
 
@@ -50,14 +52,13 @@ line yourself; gstack never writes the plan.
   with `gstack-config set autoplan_checkpoint drive`) so a run survives machine replacement: a
   generation is published at rest, after each bound voice and after each phase transition; restore
   with `resume --out <new dir> --from <dir>/<run>`, which never redispatches a bound voice.
-- Plans carry `## Before → after`, `## Why it matters`, `## What caused this work`, `## Big decisions`;
-  relay the printed `RELAY: gstack-owner-brief render --captain` output to your Captain (or the person),
-  then `gstack-approvals import --autoplan <dir>` after `answer` (`capy/skill/gstack/captain.md`).
+- Plans carry `## ELI5` (5-10 plain sentences), `## Before → after`, `## Why it matters`, `## What caused this work`, `## Big decisions`;
+  relay the printed `RELAY: gstack-owner-brief render --captain` output to your Captain (or the person), then `gstack-approvals import --autoplan <dir>` after `answer` (`--stack <b1,b2,...>` for a stack; `capy/skill/gstack/captain.md`).
 
 ### Commands
 
 - `gstack-autoplan next --out <dir> --plan <plan.md> [scope flags] [--light] [--spend-cap <usd>] [--max-rounds <n>] [--scaffold]`
-  first call: init the run, print PHASE:, SCOPE:, DRIVER: and one ATTEMPT: per voice; --max-rounds caps review rounds per phase (default 3 unattended), and an unattended Capy run reserves 5.00 per host attempt unless --estimate-usd <n> says otherwise, so --spend-cap binds.
+  first call: init the run, print PHASE:, SCOPE:, DRIVER: and one ATTEMPT: per voice; --max-rounds caps review rounds per phase (default 2 unattended), and an unattended Capy run reserves 5.00 per host attempt unless --estimate-usd <n> says otherwise, so --spend-cap binds.
 - `gstack-autoplan next --out <dir> [--redispatch <attempt>]`
   later calls: open the next phase or reprint open attempts; never redispatches on its own.
 - `gstack-autoplan submit --out <dir> --phase <p> --voice native|outside --record <file.md> --model <id> [--attempt <id>]`
@@ -93,8 +94,7 @@ line yourself; gstack never writes the plan.
 
 ## Reviewer result format
 
-Every prompt ends with this contract; `submit --result` enforces it, `submit --record` accepts
-the looser record shapes above.
+Every prompt ends with this contract; `submit --result` enforces it, `submit --record` accepts the looser shapes above.
 
 RESULT FORMAT (required by gstack-autoplan; the parent binds your file by this contract):
 1. The first line of your result is exactly: INPUT: <phase> <snapshot sha256>
@@ -109,7 +109,7 @@ RESULT FORMAT (required by gstack-autoplan; the parent binds your file by this c
 
 A reply binds to the `gate_rev` you read (`--gate-rev`). Bare `yes`/`no` is unparsed, never guessed.
 
-- `rec`: every item takes its recommendation, plan changes included (each prints APPLY:); `all` is an alias.
+- `rec`: every item takes its recommendation, plan changes included (each prints APPLY:); `all` and `do it` are aliases.
 - `as-is`: keep every direction; no plan change.
 - `d3b uc1a`: one <id><option> token per item you set; unanswered auto items take their default.
 - `rec except d3b`: recommendations, with the listed overrides.
@@ -157,3 +157,5 @@ Spend caps. Each lane runs under the `--spend-cap` the coordinator names; a lane
 Before done. A lane pushes a WIP commit to its branch after each step and gates a pushed SHA. It is done only when `gstack-pregate run --allow-repo-commands` passes; `requires-remote` needs `--stage tests --remote --spend-cap <cap>`. Where `.gstack/pregate.json` has a `sealed` key, it runs `gstack-pregate sealed` before any push or PR creation; a refusal stops the push.
 
 Handoff format. A lane reports in this order, identifiers first: PR URL (or `no PR` with branch and SHA), `GSTACK_RESULT` line, the `gstack: ok|fail <rev>` line, the `PREGATE:` line, gate summary (lanes passed/failed/skipped), behavior changes (or `none`), spend (spent/reserved/unknown), then what it could not verify. Full thread ids (`jam_…`), never short codes, in every cross-thread message. Prose after the identifiers may be truncated; nothing before them may be.
+
+Decision trail. A lane keeps `<run dir>/decisions.tsv` through `gstack-decision-trail <file> <phase> <decision> <why> <evidence> <result>` (one row per fork, unit, revert or blocker; evidence a pointer that resolves) and opens it with `gstack-decision-trail start <file> <run id>` when another run wrote it first. Before done it audits the trail against the transcript, superseding a wrong row with a new one rather than editing it, has a reviewer on another model family read the trail, and ends its report with an `Attention` section (`reviewed by <model>`, then the flags, or `No flags`). The full rule is [docs/unattended.md](../docs/unattended.md#the-decision-trail).

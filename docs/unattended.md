@@ -16,8 +16,10 @@ it, so `headless` keeps its BLOCK semantics.
 
 ## What the session kind changes
 
-`gstack-skill-start` prints `SESSION_KIND: unattended` and
-`UNATTENDED_SESSION: true`, then applies these rules for the whole skill:
+`gstack-skill-start` prints `SESSION_KIND: unattended`,
+`UNATTENDED_SESSION: true` and the `unattended-session` instruction block
+(`GSTACK_INSTRUCTION_BEGIN: unattended-session <session-id>` through
+`GSTACK_INSTRUCTION_END`), then applies these rules for the whole skill:
 
 - **No prompts.** The update check, upgrade offer, telemetry and sync consent,
   onboarding tips and routing blocks are suppressed exactly as they are for
@@ -80,7 +82,15 @@ Not every workflow writes this line or a run directory today:
   record), not a run directory.
 - **A refused launch.** Any skill whose install check refuses it at startup
   prints `GSTACK_RESULT: skill=<name> status=refused run=-` and stops.
-- **Every other workflow skill** (`/ship`, `/review`, `/qa`, `/design-review`,
+- **`/ship`** ends with `gstack-ship-receipt result --pr <n>` (or `--body
+  .gstack/tmp/ship-receipt.md` after the handoff section), which binds the
+  receipt to the branch head, writes the run record and prints
+  `GSTACK_RESULT: skill=ship status=complete run=<dir>`. That line and that
+  record are the machine-readable READY evidence; [What /ship leaves for a
+  parent](#ship-evidence) below is the whole contract (the refused and
+  incomplete lines, the one publication an unattended run may make, the
+  `review_loop` counters, the outside voice on Capy and the `CARRY:` lines).
+- **Every other workflow skill** (`/review`, `/qa`, `/design-review`,
   `/spec`, `/land-and-deploy` and the rest) gets the session rules above (no
   prompts, approvals stay pending, nothing published), but has no step that
   writes a run directory or prints the line, so a parent should not wait for
@@ -88,20 +98,148 @@ Not every workflow writes this line or a run directory today:
   helper writes its `gate.json` yet (`gstack-gate` renders and parses a gate
   list; it does not create one). `/cso` skips the shared startup, so these
   session rules do not reach it at all. Read each skill's own record instead:
-  the review-log rows (`gstack-review-read`) for `/review`, the
-  `qa-report-*.md` file for `/qa`, and the ship receipt for `/ship`. When
-  the run did not push (an unattended run must not), read the receipt file in
-  the child's checkout with `gstack-ship-receipt read --body .gstack/tmp/ship-receipt.md --json`;
+  the review-log rows (`gstack-review-read`) for `/review` and the
+  `qa-report-*.md` file for `/qa`. For a `/ship` run from before the result
+  line, read the receipt instead: when the run did not push (an unattended run
+  must not), read the receipt file in the child's checkout with
+  `gstack-ship-receipt read --body .gstack/tmp/ship-receipt.md --json`;
   use `gstack-ship-receipt read --pr <n> --json` only once a PR exists. In both
   cases compare the receipt's `head` to the branch SHA (`git rev-parse HEAD` in
   the child's checkout): `read` does not check that the receipt is current, so
-  an older PR's receipt reads as valid.
+  an older PR's receipt reads as valid; `result` does.
 
 Every workflow command shares one exit table: `0` ok, `1` fail, `2` usage,
 `3` refused or needs a flag. Error lines end with a result code in parentheses,
 for example `findings.jsonl:12: ... (ARTIFACT_SCHEMA)`; each code has an anchor
 in [troubleshooting.md](troubleshooting.md#unattended-runs-and-artifacts) with
 a `fix:` clause. Grep the code, not the prose.
+
+<a id="ship-evidence"></a>
+## What /ship leaves for a parent
+
+One section for everything a parent (a Captain, a crew thread, a merge queue)
+reads after an unattended `/ship`: the READY evidence, the review loop's
+counters, the outside voice's record, and the carry across a base merge.
+
+### The READY evidence: `gstack-ship-receipt result`
+
+`/ship` Step 22 runs `gstack-ship-receipt result --pr <n>` (or `--body
+.gstack/tmp/ship-receipt.md` after the handoff section). It binds the receipt
+in the PR body (or the handoff file) to HEAD, writes
+`<state root>/ship/runs/<utc>-<head12>/` and prints the terminal line:
+
+```
+GSTACK_RESULT: skill=ship status=complete run=<dir>
+```
+
+The run directory holds `ship-receipt.md` (the block, copied) and
+`ship-run.json` with `head`, `pr`, `base`, `version` (`"none"` for a
+repository with no version source, [ship-policy.md](ship-policy.md#ship-receipt)),
+`queue_mode`, `session_kind`, `receipt` (the copied block's path) and
+`receipt_source`. It is a /ship record, not the `run` v1 manifest below, so
+read it directly; `gstack-artifact validate` does not apply. A parent's merge
+check is then mechanical: take `run=` from the last result line, read
+`ship-run.json`, compare its `head` to the PR head, and quote the
+`SHIP_RECEIPT: pr=<n> head=<head12> …` line in the READY block.
+`gstack-ship-queue ready`, `train build` and `verify --train` make the same
+comparison from the PR body ([ship-policy.md](ship-policy.md#ship-before-ready)).
+
+The other endings, each greppable: when gh cannot read the PR,
+`GSTACK_RESULT: skill=ship status=incomplete run=-` (exit 1); a receipt that is
+missing or names another head, `GSTACK_RESULT: skill=ship status=refused run=-`
+with `QUEUE_RECEIPT_MISSING` or `QUEUE_RECEIPT_STALE` on stderr (exit 3), the
+line a run that stops before publication prints itself; and `result --pr <n>`
+refuses `QUEUE_RECEIPT_STALE` when HEAD is not the PR's pushed head.
+
+The one publication the unattended rules allow: when an open PR for the branch
+exists and HEAD is its pushed head, Step 18 takes the pr-body section's
+existing-PR path and posts the body (receipt first) and title through
+`gstack-post`. It never runs `pr-create`, never pushes a commit and never runs
+`gh pr ready`; a branch with no open PR, or whose PR head is not HEAD, takes
+the handoff section. When the run committed anything (a CHANGELOG entry,
+generated tests), the parent pushes those commits itself, then reruns the
+receipt write, the body post and `result` at the pushed head: a receipt for an
+unpushed head is `QUEUE_RECEIPT_STALE` to the queue.
+
+### The review loop's counters
+
+The receipt's `review_loop` object, written from `gstack-review-scope summary
+--since <REVIEW_SINCE>`, is the loop's machine-readable outcome: `passes`
+(Step 9 full passes this ship ran, 1 or 2; up to 3 under `review_scope: all`),
+`blocking_found` (distinct blocking findings across them), `deferred`
+(blocking findings in unchanged code filed as issues, Step 11's late defers
+included), `noted`, `fixed` and `scope`. The
+summary line a parent reads prints it as `passes=<n> blocking_found=<k>
+deferred=<m>`; the PR body lists the deferred issues under `## Deferred
+findings` and the below-floor items under `## Review notes`. A pass that finds
+nothing is `NO FINDINGS` from every reviewer and a pass with no edits, which
+is the loop's exit, never a failed review ([review-policy.md](review-policy.md)).
+Three counters appear only when the run recorded them: `fix_checks` (fix-check
+rows, never passes), `dispatches` (reviewer dispatches by role) and
+`est_input_tokens` (prompt plus diff bytes the dispatches read, / 4, a relative
+estimate and never a bill).
+
+### Report length
+
+A parent reads many lanes, so length is a cost it pays per lane. A READY block
+holds its required lines plus at most 150 words; a completion report holds at
+most 300 words; a subagent brief names the files to read instead of pasting
+them. Evidence goes in files the report points to. Waits go on operations,
+never on polling wakes.
+
+### Token caps and fresh-context handoffs
+
+A parent bounds a /ship run with `--token-cap <n>` (or `GSTACK_SHIP_TOKEN_CAP`).
+It is an admission cap: /ship meters usage, reserves every step and dispatch
+batch before it starts, and stops `status=incomplete` with a `RECOVER:` line
+instead of starting work that would cross the cap. Long runs hand Steps 7–11.5
+and 12–22 to fresh-context children. The flow, the BUDGET line and the result
+codes are in [ship-budget.md](ship-budget.md).
+
+### The outside voice on Capy
+
+Step 11's outside adversarial review prefers the Codex CLI. On a Capy machine
+the Codex CLI is normally absent (selecting a model in Capy installs and
+authenticates no CLI), and the accepted outside voice is then a subagent
+running a different model family from the parent: a full outside voice, not
+degraded coverage, as long as the model that reviewed is recorded. Its
+review-log row is the same row every Step 11 pass writes
+(`ship/sections/adversarial.md`): `skill: "adversarial-review"`,
+`phase: "adversarial"`, `source` naming the runner that actually reviewed
+(the outside provider that reviewed, with the model recorded, for the
+cross-family subagent; `codex` for completed Codex CLI output, as
+`ship/sections/adversarial.md` prescribes),
+`outside_provider` (the provider the host would have used, as the generated
+prose names it), `outside_status` (`completed` for a finished outside pass;
+`unavailable` when neither the CLI nor a subagent completed, the cause on the
+`gstack-outside-voice run:` stderr line and in `<out>.meta.json` rather than
+in the row; `disabled` under
+`codex_reviews: disabled`), `status`
+(`clean`, `issues_found` or `unavailable`), `completed`, `converged`, and the
+subagent's model recorded with the pass (`gstack-outside-voice run --runner
+host-subagent --result <file> --model <id> --prompt <file> --out <file>` binds
+it; the row's text names it where the host reports it). The native in-host adversarial
+subagent writes its own row with `source: "in-host"`; native completion never
+credits outside coverage. A parent reads the rows with
+`gstack-review-read` and treats `outside_status: unavailable` as missing
+coverage, not as a clean outside review.
+
+### The carry across a base merge or a test-only fix
+
+When the parent merges the base in or fixes a test after the receipt was
+written, it runs `gstack-ship-receipt carry --pr <n> --base <base> --dry-run`
+instead of another /ship; on `CARRY: would carry` it runs `gstack-pregate` at HEAD
+and reruns carry with `--pregate .gstack/tmp/pregate.json`. `CARRY: carried from <old> to <new> (<reason>)` plus the
+`GSTACK_RESULT: skill=ship status=complete run=<dir>` line means the receipt
+now names HEAD with a `carry` object holding the `git range-diff` evidence, and
+`ship-run.json` gains `carried_from` and `carry_reason`; the `review_loop`
+counters are kept, because the reviewed product diff is unchanged. `CARRY:
+current` means nothing moved. `CARRY: refused (RECEIPT_CARRY_PRODUCT_CHANGED)`,
+`(RECEIPT_CARRY_TREE_MISMATCH)` or `(RECEIPT_CARRY_REFUSED)` with the refused
+result line means the product diff changed, or history was rewritten onto a
+tree no review saw, so /ship runs again;
+`(RECEIPT_GIT_TOO_OLD)` means the machine's git predates 2.39 and cannot run
+`patch-id --verbatim` ([ship-policy.md](ship-policy.md#receipt-carry)).
 
 ## The run directory
 
@@ -125,8 +263,10 @@ JSON Schema for any of `findings`, `decisions`, `tasks`, `timing`, `run`,
 
 ## How a parent consumes a run
 
-1. **Decide whether the run finished.** `gstack-artifact validate <dir>/run.json`
-   is the deterministic completion check. It exits `0` and prints
+1. **Decide whether the run finished.** For an `/autoplan` run directory,
+   `gstack-artifact validate <dir>/run.json`
+   is the deterministic completion check (a `/ship` `run=` directory holds
+   `ship-run.json`, read directly as described above). It exits `0` and prints
    `ARTIFACT_VALID: run=<id> status=<status>` only when the manifest parses and
    matches its schema, every required phase and each reviewer voice has a
    terminal outcome, every listed artifact exists inside the run directory with
@@ -242,7 +382,9 @@ the plan.
    so a gate an agent closed is distinguishable from one the owner closed.
    `gstack-autoplan recommend` changes one recommendation before relay; it
    bumps the gate's `rec_rev`, and a later `rec` needs the `--rec-hash` from
-   the render the owner saw (`GATE_REC_STALE`).
+   the render the owner saw (`GATE_REC_STALE`). Every `GATE:` line is followed
+   by `GATE_SPEND:` and `GATE_REC_COST:` (also `gate_cost` in `--json`; see
+   `autoplan/DRIVER.md`).
    A user challenge both voices raised on a confirmed finding (a title match,
    not file:line proximity alone, which is `unverified`) with the same
    `changes` value is recommended as `b` only with one shared proposal: a
@@ -362,6 +504,53 @@ by its runner. Result codes: `EXECUTION_UNKNOWN`, `RUN_LOCKED`,
   decision ids are renamed and journaled); one written by a newer gstack is
   refused.
 
+### Carry-forward
+
+A gate revision after the first (`gate_rev` 2 and later, written after a
+`revise`) is answered with the owner's recorded words from the revision before
+it when nothing new needs their decision. `gstack-autoplan` prints
+`CARRIED: gate_rev=<n> <- gate_rev=<m> words="<their words>" by=<relayer> reason=<why>`,
+then the usual `APPROVED:` lines, and journals `gate_carried`. The carry needs
+all of: the earlier gate approved (`p1a` or `p1b`) with `rec` or "do it"
+(not item tokens), no item there left pending, and the owner's words
+recorded; that gate was not itself carried; every accepted change incorporated
+or settled; the plan file's bytes equal those recorded at the gate or at the
+`revise` that took the changes (any later edit refuses, an ELI5-only one
+included); no urgent or
+outside-plan finding open; and every new gate item one of the cases below.
+Anything else prints `CARRY: no (<why>)` (journal `carry_refused`) and the gate
+goes to the owner as before. `--no-carry-forward` on the first `next` turns it
+off for the run.
+
+- **"do it".** When the owner's words were "do it" (their words, not a
+  `captain:` relay of them), a new `auto` item that changes no scope, cost or
+  direction, whose recommended option changes no plan text, and is no round
+  or budget grant takes its recommendation. The
+  decision row gets `carried_under: do it`, the output prints
+  `CARRIED_UNDER_DO_IT:` per item, and the approval record lists them as
+  "taken under "do it", not seen by the owner". `rec` carries no new item.
+- **Unreviewed post-cap delta.** A "plan changed after <phase> cap" item
+  recommending `a` (accept) is read by one reviewer before it carries. `CARRY_CHECK:` names the attempt and
+  the prompt (the delta against `plan-at-gate.r<m>.md`, the accepted changes,
+  the full plan); the run reserves the estimate in `spend.json` and refuses
+  when it is over `--carry-check-cap <usd>` (default 5) or the run's cap.
+  Dispatch it to a model family other than the plan reviewers', then
+  `check --out <dir> --attempt <id> --result <file> --model <id>`
+  (`--same-family "<why>"` when no other family is available). A High or
+  Critical finding, or `--unavailable "<reason>"`, leaves the gate for the
+  owner. The verdict is saved as `carry_check` on `gate.json`, on the
+  decision rows (`carry_check`) and in `<dir>/decisions.tsv`. A pending
+  check is void, its reservation released and the gate left for the owner,
+  when the owner answers the gate, the plan is revised, a new gate is
+  written, or the delta changed after dispatch.
+
+Carried rows keep `answered_by: agent:gstack-autoplan` and name their source
+(`carried_gate_from`, `carried_gate_rev`, `carried_answered_by`);
+`gstack-approvals import --autoplan` writes the carried gate as its own row,
+and `gstack-owner-brief render --captain` opens with "Nothing pending.
+Carried forward from gate_rev <m>", followed by any items taken under "do it"
+without being shown to the owner.
+
 ## Owner brief
 
 `gstack-owner-brief render --out <dir>` is what the owner sees at the final
@@ -374,7 +563,9 @@ replaces the generated sentence with the run's own), then the numbered
 decisions through the gate list: seven per page (`--page N`), stable ids,
 each `auto` item annotated with the default taken if unanswered, each
 `approval` item `pending until you answer` or `decided <id><letter> on <date>`.
-The last line names `review-record.md`, where the full review lives, and the
+It carries a `Cost so far:` sentence (spent, worst case, cap, and the estimate for
+the phases `rec` can reopen); `render --captain` puts it in a `### Cost` section above
+the relaying-agent trailer. The last line names `review-record.md`, where the full review lives, and the
 `gstack-autoplan answer` call that answers the page. `--write` also saves
 `brief.md` in the run directory. `/autoplan` Phase 4 presents this output
 verbatim and writes the former long report to `review-record.md`.
@@ -427,3 +618,83 @@ fix. `GSTACK_ALLOW_UNSUPPORTED_RUNTIME=1` admits anyway (`INSTALL_VERDICT:
 overridden`), recorded as a deviation. TypeScript entrypoints use
 `checkInstallAdmission` from `lib/install-verdict.ts`; the Bash side is
 `bin/gstack-install-verdict.sh`. See [capy-install.md](capy-install.md#the-launch-line).
+
+## The decision trail
+
+A long or unattended run keeps one tab-separated trail of its decisions at
+`<run dir>/decisions.tsv`, written through `gstack-decision-trail <file>
+<phase> <decision> <why> <evidence> <result>`, so the parent reads what the run
+chose and why without the transcript. The helper stamps the time, writes the
+header once, flattens each cell to one line and quotes a cell that starts
+with `=`, `+`, `-` or `@`, so evidence lifted from a PR title or a filename
+cannot run as a formula when a reviewer opens the file in a spreadsheet.
+Log the forks, not the keystrokes: an approach chosen or dropped, a unit done
+with its verification result, a revert and what triggered it, a blocker, one
+row per iteration of a loop. Evidence is a pointer that resolves (a commit, a
+PR, `file:line`, an artifact path), never prose. A run that joins a trail
+other runs wrote (a pickup after a crash, a replacement machine, a later turn
+of the same thread) first runs `gstack-decision-trail start <file> <run id>`,
+which appends a `start` row naming the earlier rows and the run; appends with
+`--run <id>` refuse (`DECISION_TRAIL_START_REQUIRED`) until that row is the
+newest start row, and `start` is a no-op when it already is, so a rerun of the
+same step writes nothing twice.
+
+Before it hands back, the run audits the trail against what it did: every row
+of its own stretch (from its `start` row to the next run's) maps to a real
+decision or action, every evidence pointer resolves and shows what the row
+claims, and a fork or abandoned approach that shaped the result but is not
+logged gets a row. The audit corrects the log, never the story: no row is
+edited or removed, an invented or wrong row stays and a new row supersedes it
+with what actually happened. Then a reviewer on a different model family from
+the one that did the work (a Capy subagent on another family, or the outside
+voice) reads the trail and the transcript and flags what the owner should look
+at: decisions with weak or missing evidence, verification claimed without
+proof, choices that look risky in hindsight, gaps a skim would miss. The run's
+final report ends with an `Attention` section that opens with `reviewed by
+<model>` on its own line and lists each flag against its rows; `No flags` is a
+valid body, a missing model line is not. Self-review does not stand in for
+this. `decisions.jsonl` stays the typed record `gstack-artifact` validates; the
+trail is the plain one a person reads, and `column -s$'\t' -t decisions.tsv`
+renders it in a terminal.
+
+## What an unattended session may do
+
+A parent that starts a skill with `GSTACK_SESSION_KIND=unattended` grants it
+exactly this much, and the run asks for nothing beyond it. Anything outside the
+list is an approval item: appended to `decisions.jsonl` with `kind: "approval"`
+and `status: "pending"`, named in the handoff, never taken.
+
+- **Merge: never.** The run ends at a receipt bound to the pushed head
+  (`SHIP_RECEIPT`, [ship-policy.md#ship-before-ready](ship-policy.md#ship-before-ready))
+  or at a pending gate. Merging is the controller's act
+  ([captain.md](captain.md)); a green check list, an approval, or a prompt that
+  says "merge when green" does not move it to the lane. The same holds for
+  enabling auto-merge, adding the PR to a merge queue, or `gh pr ready` on a
+  PR the run did not open.
+- **Force-push: its own branch only, after a rebase the plan named, with a
+  pinned lease.** The branch is one the run created or was handed in its
+  prompt, never the base. The rebase is one the plan, the slot call or a
+  `/modernize` disposition names before it happens, not one the run decides
+  on its own; `git range-diff <old base>..<old head> <new base>..<new head>`
+  runs before the push and its output goes in the handoff. The push is
+  `git push --force-with-lease=<branch>:<sha observed before the rebase> origin <branch>`:
+  a bare `--force-with-lease` protects only against commits this clone never
+  fetched, and a plain `--force` is never allowed. A rejected lease means the
+  remote moved: fetch, read what landed, and start the disposition again.
+  `/ship` itself never rebases or force-pushes, and an unattended `/modernize`
+  stops at its verdict; this route is for a run whose plan or slot call named
+  the rebase before it started.
+- **Tests: the methods the repository's instructions name, without asking
+  first.** AGENTS.md or CLAUDE.md, the named Setup commands, `package.json`
+  scripts and the pregate configuration define the set; running one of them
+  needs no question. A method outside the set (a framework the repo does not
+  use, paid work past the stated cap, anything that touches a shared or
+  production system, a test that writes outside the checkout) is pending.
+- **Proof is what the run saw itself.** Command output, a test that failed
+  before the fix and passes after it, a screenshot, a file read in this
+  session. A handoff note, an earlier PR comment or a parent's summary is
+  context to recheck, not evidence; the handoff says which claims were
+  rechecked and which were not.
+
+`/ship`'s handoff section (`ship/sections/handoff.md`) points here, so a lane
+reads the grant where it reports done.

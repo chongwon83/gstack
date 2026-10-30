@@ -12,6 +12,7 @@
  */
 import { RELEASE_RESULT_CODES } from './result-codes-release';
 import { CAPY_RESULT_CODES } from './result-codes-capy';
+import { BUDGET_RESULT_CODES } from './result-codes-budget';
 
 export interface ResultCode {
   /** Stable `<a id>` in docs/troubleshooting.md. */
@@ -226,8 +227,8 @@ export const RESULT_CODES = {
   },
   CHANGELOG_DUPLICATE_HEADING: {
     anchor: 'changelog-duplicate-heading',
-    summary: 'two CHANGELOG sections carry the same version heading',
-    fix: 'merge the duplicate sections into one entry under the new version',
+    summary: 'two CHANGELOG sections carry the same version heading, beyond any duplicate the base branch already carries',
+    fix: 'merge the duplicate sections the PR introduced into one entry under the new version',
   },
   CHANGELOG_TOP_MISMATCH: {
     anchor: 'changelog-top-mismatch',
@@ -385,7 +386,7 @@ export const RESULT_CODES = {
   PREGATE_NO_LANE: {
     anchor: 'pregate-no-lane',
     summary: 'a touched source file maps to no test lane through imports, repo-path literals, the bin/<name> convention or a declaration',
-    fix: 'add a test that names the file, or declare its lane (or an explicit empty lane) under `dependencies` in .gstack/pregate.json. Markdown no test depends on is already a docs/no-tests empty lane; other documentation goes in `empty_lanes`',
+    fix: 'add a test that names the file, or declare its lane (or an explicit empty lane) under `dependencies` in .gstack/pregate.json. Markdown no test depends on is already a docs/no-tests empty lane; other documentation goes in `empty_lanes`; a release manifest whose only change against the merge base is its version values is waived as version-stamp-only',
   },
   PREGATE_LANE_FAILED: {
     anchor: 'pregate-lane-failed',
@@ -597,7 +598,7 @@ export const RESULT_CODES = {
   },
   UPGRADE_BUSY: {
     anchor: 'upgrade-busy',
-    summary: 'bin/gstack-upgrade changed nothing: another live session holds a workflow lease on this installation (bin/gstack-lease live), so moving the checkout would change gstack under it',
+    summary: 'bin/gstack-upgrade changed nothing: another live session holds a workflow lease on this installation (bin/gstack-lease live), or, at a Capy install, the caller\'s own run does, so moving the checkout would change gstack under it',
     fix: 'wait for those sessions to finish (bin/gstack-lease list names each pid and age), then re-run bin/gstack-upgrade; GSTACK_UPGRADE_FORCE=1 overrides when you know they are idle',
   },
   UPGRADE_FETCH_FAILED: {
@@ -770,6 +771,7 @@ export const RESULT_CODES = {
   },
   ...RELEASE_RESULT_CODES,
   ...CAPY_RESULT_CODES,
+  ...BUDGET_RESULT_CODES,
 } as const satisfies Record<string, ResultCode>;
 
 export type ResultCodeName = keyof typeof RESULT_CODES;

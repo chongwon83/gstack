@@ -52,6 +52,7 @@ const WINDOWS_FRAGILE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 // the failure mode is structural rather than detectable via source-file scan.
 export const KNOWN_WINDOWS_INCOMPATIBLE: Array<{ file: string; reason: string }> = [
   // Like test/paid-rerun.test.ts (excluded by pattern), it replays a gate capture through the paid lane's --report and --rerun-plan CLI.
+  { file: 'test/shared-libs-index-flags-readonly.test.ts', reason: 'its assume-unchanged replay seeds the review through test/helpers/shared-libs-path-fixture.ts, which launches bin/gstack-review-log (a bash script) directly; windows-latest refuses it as not found in $PATH (windows-free-shard 5, run 40727825859)' },
   { file: 'test/credential-rejection.test.ts', reason: 'replays run 39696775546 through the --report and --rerun-plan CLI of the paid lane, which runs only on Linux CI; on windows-latest that CLI exits 1 with EINVAL in open() (windows-free-shard run 39982914852)' },
   // Field list 2, W11: the review-voice install is a POSIX launcher contract, exercised end to end on Linux and macOS.
   { file: 'test/capy-review-voice.test.ts', reason: 'copies the checkout with tar -C into the temp root (GNU tar reads a D: path as a remote host) and launches the bash --for review-voice installer with a colon-joined GSTACK_LAUNCH PATH' },
@@ -65,15 +66,22 @@ export const KNOWN_WINDOWS_INCOMPATIBLE: Array<{ file: string; reason: string }>
   { file: 'test/pregate-regate.test.ts', reason: 'its REGATE and MIGRATION_COLLISION verdicts differ on windows-latest, not diagnosed in fix wave PR 5; gstack-pregate regate itself launches through lib/script-invocation.ts' },
   { file: 'test/pregate-invalidation.test.ts', reason: 'expects the Linux-host lanes verdict (the windows lane as the requires-remote obligation); on Windows the Linux lane is the obligation instead; gstack-pregate itself launches through lib/script-invocation.ts' },
   { file: 'test/pregate-selection.test.ts', reason: 'its gstack-pregate (bin) cases expect the Linux-host lanes verdict (a local lane run); on Windows the fixture\'s Linux lane is a requires-remote obligation' },
+  { file: 'test/pregate-stamp-only.test.ts', reason: 'its gstack-pregate (bin) cases expect the Linux-host lanes verdict for the mapped-file and test-reads-manifest fixtures, and its mode-change case needs a POSIX exec bit and symlink; the stamp rule it drives is POSIX-run like the other pregate fixtures' },
+  { file: 'test/pregate-starter.test.ts', reason: 'expects the Linux-host lanes verdict (the fixture\'s Linux lane runs locally and the no-policy row is warn); on Windows that lane is a requires-remote obligation; gstack-pregate itself launches through lib/script-invocation.ts' },
+  { file: 'test/pregate-allowlist.test.ts', reason: 'spawns bin/gstack-pregate through test/helpers/pregate-fixture.ts runBin and gstack-redact through the bin shebang; the allowlist rules it drives are POSIX-run like the other pregate fixtures' },
+  { file: 'test/pregate-environment.test.ts', reason: 'drives exit-127 and spawn-failure classification through a POSIX shell (bash\'s command-not-found exit) and expects the Linux-host lanes verdict; on Windows the fixture\'s Linux lane is a requires-remote obligation' },
+  { file: 'test/pregate-scratch.test.ts', reason: 'asserts the 0700 mode of the per-run scratch directory and the Linux-host lanes verdict (lane and guard logs written locally); Windows fakes mode bits and makes the Linux lane a requires-remote obligation' },
   { file: 'test/pregate-bats-nested.test.ts', reason: 'expects the bats lane to run locally, which it does on a Linux host; on Windows the fixture\'s Linux lane is a requires-remote obligation' },
   { file: 'test/pregate-docs-lane-review.test.ts', reason: 'spawns bin/gstack-pregate through test/helpers/pregate-fixture.ts runBin (shebang via CreateProcess); the docs-lane selection rules it drives are POSIX-run like the other pregate fixtures' },
   { file: 'test/pregate-dart.test.ts', reason: 'its dart, flutter and fvm stand-ins are bash scripts on a colon-joined PATH, which Bun.which and CreateProcess cannot use on Windows, and its containment case needs a POSIX symlink; the Dart lane code it drives is POSIX-run like the other pregate fixtures' },
   { file: 'test/pregate-non-js.test.ts', reason: 'spawns bin/gstack-pregate through test/helpers/pregate-fixture.ts runBin and expects the Linux-host lanes verdict, like test/pregate-docs-lane-review.test.ts and test/pregate-selection.test.ts' },
   { file: 'test/pregate-remote-gbrain.test.ts', reason: 'spawns bin/gstack-pregate through test/helpers/pregate-fixture.ts runBin (shebang via CreateProcess) and runs the gbrain-shaped ci:ubicloud package script through the POSIX lane runner, like test/pregate-remote.test.ts' },
+  { file: 'test/pregate-remote-stamp-only.test.ts', reason: 'expects the Linux-host lanes verdict like test/pregate-remote.test.ts (on Windows the fixture\'s Linux lane is a requires-remote obligation) and skips itself on win32 (describe.skipIf), so the curated lane would run an empty file (#3485, #3486)' },
   // C-pregate: these drive bin/gstack-issue-links and bin/gstack-ship-receipt through
   // test/helpers/pregate-fixture.ts runBin.
   { file: 'test/stamp-templates.test.ts', reason: 'spawns bin/gstack-tree-receipt through test/helpers/restamp-fixture.ts runBin (shebang via CreateProcess)' },
   { file: 'test/ship-issue-intent.test.ts', reason: 'spawns bin/gstack-issue-links and bin/gstack-ship-receipt through test/helpers/pregate-fixture.ts runBin (shebang via CreateProcess) with a `gh` shell shim on PATH' },
+  { file: 'test/ship-receipt-carry-pregate.test.ts', reason: 'passes a gstack-pregate result to gstack-ship-receipt write and carry; on Windows the fixture\'s Linux lane is a requires-remote obligation, so write refuses the pregate as uncleared and exits 1 (windows-free-shard run 40611810409), like the other --pregate receipt tests' },
   // PR E2: lane ownership and evidence verification run bin/gstack-lane-check and bin/gstack-evidence
   // through test/helpers/restamp-fixture.ts runBin (shebang via CreateProcess); the lib paths are
   // exercised in the same file, so there is no Windows-safe split to keep.
@@ -285,6 +293,14 @@ export const KNOWN_WINDOWS_INCOMPATIBLE: Array<{ file: string; reason: string }>
   {
     file: 'test/ship-queue-train.test.ts',
     reason: 'drives bin/gstack-ship-queue against the stateful #!/bin/sh gh shim in test/helpers/ship-queue-train-fixture.ts; on windows-latest spawnSync(\'gh\') resolves the runner\'s gh.exe instead of the shim (windows-free-shard run 39152702056)',
+  },
+  {
+    file: 'test/ship-queue-train-cost.test.ts',
+    reason: 'drives bin/gstack-ship-queue train verdict against the same #!/bin/sh gh shim in test/helpers/ship-queue-train-fixture.ts; on windows-latest spawnSync(\'gh\') resolves the runner\'s gh.exe instead of the shim (windows-free-shard 2 on #3478 at d5e6a7d)',
+  },
+  {
+    file: 'test/ship-queue-train-ops.test.ts',
+    reason: 'drives bin/gstack-ship-queue (screen verdicts, scratch-merge screens, prune --stale, watch, forget, verify --post-merge, ready --dispatch-ci, --stack-tests) against the same #!/bin/sh gh shim in test/helpers/ship-queue-train-fixture.ts',
   },
   {
     file: 'test/ship-policy-compat.test.ts',

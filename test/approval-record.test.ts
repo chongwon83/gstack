@@ -76,6 +76,18 @@ describe('gstack-approvals add and render', () => {
     expect(fs.existsSync(path.join(state, 'projects'))).toBe(false);
   });
 
+  test('a GitHub Actions run id after a run word is not a phone number, and the record keeps it (GSTA-121)', () => {
+    const cwd = repo(); const state = tmp('appr-state-');
+    const words = 'Rule-19 grant: re-READY with --no-screen citing screen 40477638211 GREEN at 5619199800a2; gate=40477638210 passed';
+    const r = bin(['add', '--ask', 'Third rule 19 grant on the GREEN screen', '--words', words, '--by', 'GStack Minder', '--scope', 'one merge'], { cwd, env: { GSTACK_STATE_ROOT: state } });
+    expect(r.status, r.err).toBe(0);
+    const file = /^APPROVAL_RECORDED: a-[0-9a-f]{12} (.*\.jsonl)$/m.exec(r.out)![1]!;
+    expect(fs.readFileSync(file, 'utf8')).toContain('screen 40477638211 GREEN');
+    const control = bin(['add', '--ask', 'ok', '--words', 'call me on 40477638211 or +14155550123', '--by', 'g', '--scope', 's'], { cwd, env: { GSTACK_STATE_ROOT: state } });
+    expect(control.status).toBe(3);
+    expect(control.err).toContain('pii.phone.e164');
+  });
+
   test('missing fields, bad outcomes and impossible dates are usage errors', () => {
     const cwd = repo(); const state = tmp('appr-state-');
     expect(bin(['add', '--ask', 'x'], { cwd, env: { GSTACK_STATE_ROOT: state } }).err).toContain('APPROVAL_RECORD_INVALID');
@@ -182,5 +194,45 @@ describe('Capy mirror', () => {
     const read = readRecord({ file: path.join(d, 'local.jsonl'), mirror: path.join(d, 'mirror.jsonl'), branch: 'x', slug: 's', ephemeral: true });
     expect(read.rows.map(r => r.ask).sort()).toEqual(['a', 'b']);
     expect(read.state).toBe('present');
+  });
+});
+
+describe('import --autoplan --stack', () => {
+  function stackRepo(): string {
+    const d = repo('feature/one');
+    const g = (args: string[]) => expect(spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: d, timeout: 30_000 }).status).toBe(0);
+    g(['commit', '-q', '--allow-empty', '-m', 'seed']);
+    g(['branch', 'feature/two']);
+    return d;
+  }
+
+  test('writes the same rows to every branch, each in its own record; a retry adds nothing', () => {
+    const run = tmp('appr-run-');
+    autoplanRun(run, [{ by: 'agent:GSTA-36', words: 'Garry: Do it', at: '2026-10-29T03:40:00.000Z', p1: 'a' }]);
+    const cwd = stackRepo(); const state = tmp('appr-state-');
+    const env = { GSTACK_STATE_ROOT: state };
+    const r = bin(['import', '--autoplan', run, '--by', 'Garry', '--stack', 'feature/one,feature/two'], { cwd, env });
+    expect(r.status, r.err).toBe(0);
+    expect(r.out).toMatch(/^APPROVAL_IMPORTED: branch=feature\/one n=1 skipped=0 /m);
+    expect(r.out).toMatch(/^APPROVAL_IMPORTED: branch=feature\/two n=1 skipped=0 /m);
+    expect(r.out).toMatch(/^APPROVAL_IMPORTED_STACK: branches=2 added=2$/m);
+    for (const b of ['feature/one', 'feature/two']) expect(bin(['render', '--branch', b], { cwd, env }).out).toContain('Garry: Do it');
+    expect(bin(['import', '--autoplan', run, '--by', 'Garry', '--stack', 'feature/one,feature/two'], { cwd, env }).out).toMatch(/^APPROVAL_IMPORTED_STACK: branches=2 added=0$/m);
+  });
+
+  test('one unknown branch writes nothing to any branch', () => {
+    const run = tmp('appr-run-');
+    autoplanRun(run, [{ by: 'agent:GSTA-36', words: 'rec', at: '2026-10-29T03:40:00.000Z', p1: 'a' }]);
+    const cwd = stackRepo(); const state = tmp('appr-state-');
+    const r = bin(['import', '--autoplan', run, '--stack', 'feature/one,feature/nope'], { cwd, env: { GSTACK_STATE_ROOT: state } });
+    expect(r.status).toBe(3);
+    expect(r.err).toContain('feature/nope');
+    expect(r.err).toContain('(APPROVAL_RECORD_NO_BRANCH)');
+    expect(bin(['render', '--branch', 'feature/one'], { cwd, env: { GSTACK_STATE_ROOT: state } }).out).not.toContain('Approve the plan');
+  });
+
+  test('--stack goes with import --autoplan and without --branch', () => {
+    const cwd = stackRepo();
+    expect(bin(['import', '--autoplan', tmp('appr-run-'), '--branch', 'feature/one', '--stack', 'feature/one'], { cwd }).status).toBe(2);
   });
 });

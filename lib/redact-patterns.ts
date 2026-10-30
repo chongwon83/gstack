@@ -201,6 +201,35 @@ function looksLikeCompactTimestamp(span: string): boolean {
   );
 }
 
+/**
+ * Bare integers that programs print as constants: 2^30 through 2^49 and each
+ * one minus one (`4294967296`, `2147483647`), and the 32-bit multipliers,
+ * offsets and primes of common hashes and PRNGs (Knuth's multiplicative hash,
+ * the golden-ratio constant, the glibc and Numerical Recipes LCGs, FNV-1a,
+ * MurmurHash2 and 3, the MT19937 seeder, the largest 32-bit prime). pii.phone.e164
+ * reads each as a bare 10-15 digit number. Only the exact separator-free value
+ * is exempt: the same digits with a `+`, spaces, dashes or dots still report,
+ * so an E.164 number, which carries its `+`, is never exempt.
+ */
+const NUMERIC_CONSTANTS: ReadonlySet<string> = new Set([
+  ...Array.from({ length: 20 }, (_, i) => 2n ** BigInt(30 + i)).flatMap((p) => [String(p), String(p - 1n)]),
+  "2654435761",
+  "2654435769",
+  "1103515245",
+  "1013904223",
+  "2166136261",
+  "1540483477",
+  "3432918353",
+  "2246822507",
+  "3266489909",
+  "1812433253",
+  "4294967291",
+]);
+
+export function isNumericConstant(span: string): boolean {
+  return NUMERIC_CONSTANTS.has(span);
+}
+
 /** Context window for pairing a normalized parcel ID with its punctuated form. */
 const PARCEL_CONTEXT_CHARS = 400;
 
@@ -328,16 +357,28 @@ export function isNumericMetadataValue(span: string, match: RegExpExecArray): bo
  * command. Only the position decides: a run/job flag (`--run 37235771700`,
  * `--job=111534615007`), a `gh run view|watch|rerun|download|cancel`
  * argument, an `actions/runs/<id>` or `/job/<id>` URL segment, or a
- * `run_id` / `job_id` key. The same digits anywhere else still report.
+ * `run_id` / `job_id` key. An 11-digit id (every GitHub Actions run id since
+ * 2025) also counts right after a run word on the same line, the way a ship
+ * receipt, a READY block or an approval record names one (`screen 40477638211
+ * GREEN`, `gate=40323989742`, `rerun passed 40287239206`, `run #19368712345`);
+ * generic words (id, job, attempt, workflow) exempt nothing, since `customer id
+ * 14155551234` is a number. A national number written without its `+` right
+ * after a run word (`failed 14155551234`) is the accepted residual of the
+ * owner's ruling that a run id is not a phone number; gstack-post's chained-id
+ * allowlist reads the same position the same way. The same digits anywhere
+ * else still report.
  */
 const CI_ID_POSITION_BEFORE =
   /(?:--(?:run|job)(?:-id)?(?:[ \t]+|[ \t]*=[ \t]*)|\bgh[ \t]+run[ \t]+(?:view|watch|rerun|download|cancel)[ \t]+|\/actions\/runs\/|\/jobs?\/|(?:run|job)_id["']?[ \t]*[:=][ \t]*["']?)$/i;
+/** A run word with an optional ':' '#' '=' right before an 11-digit token; shared with gstack-post's chained-id allowlist. */
+export const CI_RUN_WORD_BEFORE = /\b(?:runs?|screens?|gates?|backstop|bisect|rerun|dispatch(?:ed)?|failed|passed)\s*[:#=]?\s*$/i;
 export function isCiRunIdentifier(span: string, match: RegExpExecArray): boolean {
   if (!/^\d+$/.test(span)) return false;
   const input = match.input ?? "";
   const { start } = spanBounds(match);
   const lineStart = input.lastIndexOf("\n", start - 1) + 1;
-  return CI_ID_POSITION_BEFORE.test(input.slice(Math.max(lineStart, start - 80), start));
+  const before = input.slice(Math.max(lineStart, start - 80), start);
+  return CI_ID_POSITION_BEFORE.test(before) || (span.length === 11 && CI_RUN_WORD_BEFORE.test(before));
 }
 
 /**
@@ -432,6 +473,31 @@ export function isDotenvFilename(match: RegExpExecArray): boolean {
   const spanStartInMatch = match[1] !== undefined ? match[0].indexOf(match[1]) : 0;
   const spanStart = match.index + Math.max(0, spanStartInMatch);
   return spanStart > 0 && input[spanStart - 1] === ".";
+}
+
+/** A trailing run of file extensions that are not top-level domains (checked
+ * against the IANA root zone list, 2026-10-28). Extensions that are also TLDs
+ * (`.md`, `.py`, `.sh`, `.rs`, `.so`, `.zip`, `.mov`, `.map`) are left out on
+ * purpose. */
+const NON_TLD_EXTENSIONS = /(?:\.(?:json|jsonc|jsonl|ndjson|ya?ml|toml|lock|txt|csv|tsv|log|ini|cfg|conf|xml|html?|[mc]?js|jsx|tsx?|tgz|gz|tar|bz2|xz|zst|whl|jar|gem|nupkg|deb|rpm|wasm|svg|png|jpe?g|pdf|patch|diff))+$/i;
+
+/**
+ * True when a pii.email span is a filename with an `@` in it rather than an
+ * address: `terminal-bench@2.0.json`, `lodash@4.17.21.tgz`,
+ * `eslint-config@next.yaml`. The package@version convention puts a version or
+ * tag after the `@`, so either sign decides: the "domain" ends in file
+ * extensions no TLD uses and what precedes them cannot be a domain (one dotless
+ * label or a dotted version), or it is a dotted version (two or more all-digit
+ * labels) followed by an extension that doubles as a TLD (`a@1.2.md`). A file
+ * named after an address (`jane@acme.com.json`), `user@163.com`,
+ * `alice@1.2.com` and an address at a TLD that doubles as an extension
+ * (`dev@acme.sh`, `ops@acme.md`) still report.
+ */
+export function looksLikeAtFilename(span: string): boolean {
+  const domain = span.slice(span.lastIndexOf("@") + 1);
+  const stem = domain.replace(NON_TLD_EXTENSIONS, "");
+  if (stem !== domain) return !/\.[A-Za-z]{2,}$/.test(stem);
+  return /^\d+(?:\.\d+)+\.(?:md|py|sh|rs|so|zip|mov|map)$/i.test(domain);
 }
 
 /** Extensions that mark a `<name>.local.<ext>` span as a file. Closed on
@@ -943,6 +1009,7 @@ export const PATTERNS: RedactPattern[] = [
     regex: /\b([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})\b/,
     autoRedactable: true,
     redactToken: "<REDACTED-EMAIL>",
+    validate: (span) => !looksLikeAtFilename(span),
     // Engine layers the email allowlist (example.com, noreply@, user's own,
     // repo-public authors) on top of this — see redact-engine.ts.
   },
@@ -957,12 +1024,14 @@ export const PATTERNS: RedactPattern[] = [
     // A digit-only UUID's hyphen groups read as national phone formatting, and
     // so do a county tax-map parcel ID (see looksLikeParcelId), vector
     // coordinates (looksLikeDecimalCoordinates) and seed/nonce/timestamp JSON
-    // values (isNumericMetadataValue), and GitHub Actions run and job ids in
-    // their id positions (isCiRunIdentifier).
+    // values (isNumericMetadataValue), GitHub Actions run and job ids in
+    // their id positions (isCiRunIdentifier), and bare powers of two and
+    // hash/PRNG constants (isNumericConstant).
     validate: (span, match) =>
       !insideUuid(match) &&
       span.replace(/\D/g, "").length >= 10 &&
       !looksLikeCompactTimestamp(span) &&
+      !isNumericConstant(span) &&
       !looksLikeParcelId(span, match) &&
       !looksLikeDecimalCoordinates(span) &&
       !isNumericMetadataValue(span, match) &&

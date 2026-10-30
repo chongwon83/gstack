@@ -2,6 +2,11 @@
 
 ## NEXT PRIORITY
 
+### P1: review-depth receipt follow-ups (filed 2026-10-28, from the #3567 /ship plan audit)
+
+- **Derive `carry.covers` from depth.** A carried receipt's `covers` is the fixed `CARRY_COVERS` list (lib/ship-receipt.ts); derive it from the recorded `review_depth` so a light review's carry does not claim the checks a full review ran (plan item 5, deferred at /ship). **Effort:** S. **Priority:** P1.
+- **Bound the queue's recompute time.** `gstack-ship-queue` recomputes each receipt's needed depth at READY and at train build; add a test that a five-PR train recomputes within a fixed budget, so a large diff cannot stall the train. **Effort:** S. **Priority:** P1.
+
 ### P3: `/codex --effort` follow-ups (filed 2026-10-11, from the #3146 autoplan review)
 
 - **Show the effort that ran.** Step 0.5 prints `CODEX_EFFORT: <level> (source: /codex --effort)` once, but the result footers do not repeat the effort, so it scrolls away. Add an `Effort:` line to the review, challenge and consult result footers. Blocked on skeleton bytes in `codex/SKILL.md` (cap 60,200). **Effort:** S. **Priority:** P3.
@@ -783,15 +788,15 @@ Each item was deferred with a reason during the `/claude-api prompt-audit` clean
   format errors, so it stays on today's request), the default workflow judge
   (landed, but one provider refusal on corpus item f03 under the new prompt,
   matched by one under the old prompt) and the cookie workflow judge (GSTA-91:
-  held on one new false pass on a07, zero new-request format errors, so it stays
-  on today's request; today's request itself false-passes a07 in `old-b` and on
+  held on one new false pass on a07, zero new-request format errors; the hold was
+  released on GStack Minder's 2026-10-29 ruling and it now sends the schema; today's request itself false-passes a07 in `old-b` and on
   both valid `old-a` samples, and a08 in `old-a`, so the prose step targets those). Reuse `test/fixtures/judge-calibration`
   and `scripts/judge-calibration.ts`. Priority P3. Effort M.
 - **Uncalibrated workflow-judge configurations** — build a corpus and calibrate
   schema transport for the frontier configuration (review/SKILL.md workflow); it
   stays on today's request. The cookie configuration
   (setup-browser-cookies/SKILL.md workflow) has a corpus and a held comparison-1
-  (GSTA-91), so it also stays on today's request. After any transport change,
+  (GSTA-91); it moved to the schema on GStack Minder's 2026-10-29 release ruling. After any transport change,
   re-run the review and cookie workflow judges. Priority P3. Effort M.
 - **Claude model auto-detection for the skill overlay** — when no
   `claude_overlay_model` is set, detect the Claude Code model (`ANTHROPIC_MODEL`,
@@ -3582,6 +3587,34 @@ Linux cookie import shipped in v0.11.11.0 (Wave 3). Supports Chrome, Chromium, B
 
 ## Ship
 
+### Crew template rule 22: say when a lane picks `--screen` (GSTA-165 1a follow-up)
+
+**What:** Update the rule 22 text in `captain/templates/CREW.md` (and its `docs/captain.md` home if it repeats the rule) so a lane picks `--screen` only when `gstack-ship-queue ready` recommends it: the paid selector's mode is `full-fallback` or it cannot select.
+
+**Why:** `gstack-ship-queue ready` now recommends `--no-screen` for every diff the selector can narrow, and unscreened PRs fill train seats. A crew instantiated from the template still reads the older screen guidance, so lanes can keep paying for screens the recommendation no longer asks for.
+
+**Context:** The GSTA-165 plan's PR 1 (D1) listed this doc change beside the code; PR #3619 shipped the code, `docs/ship-policy.md` and tests and left the template text out. Template rule 22 ("/ship before every READY") names the receipt and its homes but not the screen choice, and rule 6 names `--screen|--no-screen` without saying which to pick.
+
+Deferred from plan: /home/user/.capy/drive/captain-gstack-minder/plans/GSTA-165.md
+
+**Effort:** S
+**Priority:** P1
+**Depends on:** PR #3619
+
+### Train records: attribute a red train to the PR that caused it (GSTA-165 v2 item 6)
+
+**What:** Add an attribution field to the merge-train record so each red train names the PR (or none, or infra) that caused it.
+
+**Why:** The trigger for reverting GSTA-165 D1 (screen only full-fallback diffs) is "PR-attributed red trains exceed the forecast (about 10% at size 3, 16% at size 5) by 2x over 20 trains". Without an attribution field nobody can measure it, so the default cannot be revisited on evidence.
+
+**Context:** Restated in handoffs/GSTA-165/v2-additions.md item 6 and unassigned to a PR. Start from the train record in `lib/ship-queue-train-record.ts` and what `train bisect` writes back to it.
+
+Deferred from plan: /home/user/.capy/drive/captain-gstack-minder/plans/GSTA-165.md
+
+**Effort:** M
+**Priority:** P1
+**Depends on:** PR #3619
+
 ### Runtime enforcement of foreground dispatch (PreToolUse hook)
 
 **What:** A PreToolUse hook (settings.json) that forces or verifies `run_in_background: false` on Agent tool calls made inside gstack workflows, making the #497/#2440 bug class structurally impossible on Claude Code instead of prose-pinned.
@@ -5488,3 +5521,21 @@ Garry for each; revisit 2026-10-29 unless a date says otherwise.
   `test/setup-codex-scope-namespaces.test.ts` are next. Split
   each by describe block, rerun `bun run test:ubicloud --record-durations` and
   delete the entries. **Effort:** S each. **Priority:** P2.
+
+## /write-skill follow-ups (filed via /autoplan on GSTA-133, 2026-10-27)
+
+- **P2 — learnings.jsonl has no writer lock.** `gstack-learnings-log` appends with a plain `>>` and
+  `browse/src/domain-skills.ts` appends to the same file, while /learn's Prune deletes lines by rewriting it; a line
+  appended between the read and the write is lost (`bin/gstack-brain-sync` documents the same race). Fix: one
+  mkdir-style lock (as in `bin/gstack-brain-lock.sh`; macOS has no flock) taken by every writer, a removal command in
+  `gstack-learnings-log` that re-stats before its rename and copies non-matching lines byte for byte
+  (`lib/fs-atomic.ts`), and a test that appends during a removal.
+- **P2 — brain-sync resurrects removed learnings.** The `gstack-jsonl-merge` driver registered for `*.jsonl`
+  concatenates base, ours and theirs, so a row removed on one machine returns on the next merge. Needs a removal
+  marker that the merge driver and every raw reader (qa-only resolver, investigate and retro context,
+  `gstack-memory-ingest`, `gstack-brain-cache`, `gstack-skill-start`) honour. Relayed to GBrain Minder.
+- **P3 — next diet target.** Rank skills by invocations × eager tokens (context-budget.json), not by size alone; take
+  GSTA-134's pilot reports into account. /retro (41 KB template) is the largest outside GSTA-134's three.
+- **P3 — move the /learn eval onto the shared skill eval** (`docs/designs/SKILL_EVAL_CONTRACT.md`) once GSTA-2 ships it,
+  and drop the interim upstream `eval.mjs` path from `write-skill/references/diet.md`.
+

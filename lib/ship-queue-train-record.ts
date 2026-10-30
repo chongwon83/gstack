@@ -20,11 +20,18 @@ const NOTES_REMOTE_REF = 'refs/notes/gstack-trains-origin';
 
 export type TrainState =
   | 'built' | 'pushed' | 'free-pending' | 'free-red' | 'free-green' | 'dispatch-unknown' | 'dispatch-absent' | 'gate-pending'
-  | 'green' | 'red' | 'incomplete' | 'attributed' | 'red-on-main' | 'unattributed' | 'merging' | 'merged' | 'superseded';
-/** States after which a train never dispatches again; prune deletes their branches. */
-export const TERMINAL_STATES: readonly TrainState[] = ['free-red', 'attributed', 'red-on-main', 'merged', 'superseded'];
+  | 'green' | 'red' | 'incomplete' | 'attributed' | 'red-on-main' | 'unattributed' | 'merging' | 'merged' | 'superseded' | 'stale';
+/** States after which a train never dispatches again; prune deletes their branches (`stale`: every PR merged or closed outside the train, `train prune --stale`). */
+export const TERMINAL_STATES: readonly TrainState[] = ['free-red', 'attributed', 'red-on-main', 'merged', 'superseded', 'stale'];
 
-export interface ScreenChoice { choice: 'screen' | 'no-screen'; policy: 'narrow' | 'broad' | null; nonce: string | null; run: number | null; merge_sha: string | null }
+/** What the screen run itself said (lib/ship-queue-screen.ts), recorded when it was read; absent while the run is pending or unread. */
+export interface ScreenVerdictRecord { outcome: 'GREEN' | 'RED' | 'NOT_RUN' | 'INCOMPLETE'; run: number; red: string[]; flaky: string[]; detail: string; read_at: string }
+export interface ScreenChoice {
+  choice: 'screen' | 'no-screen'; policy: 'narrow' | 'broad' | null; nonce: string | null; run: number | null; merge_sha: string | null;
+  /** The scratch branch `ready --screen` pushed when GitHub's merge ref lagged the head (docs/ship-policy.md#run-a-merge-train). */
+  branch?: string;
+  verdict?: ScreenVerdictRecord;
+}
 export interface TrainSlot { pr: string; head: string; ready_at: string; screen: ScreenChoice }
 export interface TrainPrefix { index: number; commit: string; tree: string; pr: string | null }
 export interface FreeRun { run: number | null; url: string | null; head_sha: string | null; conclusion: string | null; verdict: 'green' | 'red' | 'missing' | 'stale' | 'cancelled' | 'pending' }
@@ -57,6 +64,8 @@ export interface BisectRecord {
 }
 export interface FreezeRecord {
   schema: 1; kind: 'freeze'; repo_key: string; train: string; merged: string[]; unmerged: Array<{ pr: string; head: string }>;
+  /** Slots GitHub could not answer for beside a merged one: neither merged nor unmerged (#3519); absent on records written before the field. */
+  unreadable?: Array<{ pr: string; head: string }>;
   main: { sha: string; tree: string }; reason: string; backstop: { nonce: string; run: number | null; state: string } | null;
   repair: { pr: string; head: string; train: string | null } | null; created_at: string; cleared_at: string | null; cleared_by: string | null; updated_at: string;
 }
@@ -154,7 +163,7 @@ export function recordPath(r: AnyRecord): string {
   return readyPath(r.repo_key, r.pr, r.head);
 }
 
-function noteName(r: AnyRecord): string {
+export function noteName(r: AnyRecord): string {
   if (r.kind === 'train') return `gstack-trains:train:${r.nonce}`;
   if (r.kind === 'train-attempt') return `gstack-trains:attempt:${r.train}:${r.id}`;
   if (r.kind === 'train-bisect') return `gstack-trains:bisect:${r.train}`;
@@ -225,6 +234,35 @@ function parseNote(text: string): AnyRecord | null {
     if (r.kind === 'ready' && ids.test(r.repo_key) && /^\d+$/.test(r.pr) && /^[0-9a-f]{40,64}$/.test(r.head)) return r;
   } catch {}
   return null;
+}
+
+/**
+ * Remove records from the notes ref (`train forget`): each named note is
+ * removed locally, then the ref is pushed under an exact lease on the remote
+ * tip this call fetched, so a concurrent writer's push is never overwritten
+ * (a rejected lease returns `pushed: false` and nothing is deleted locally).
+ * Names are note names (noteName); a name with no note is reported missing.
+ */
+export function forgetNotes(repoRoot: string, names: string[], remote = 'origin'): { removed: string[]; missing: string[]; failed: string[]; pushed: boolean; lease: string | null; detail: string } {
+  const f = fetchNotes(repoRoot, remote);
+  if (!f.ok) return { removed: [], missing: [], failed: [], pushed: false, lease: null, detail: f.detail };
+  const lease = git(repoRoot, ['rev-parse', '--verify', '--quiet', NOTES_REMOTE_REF]).out || null;
+  const before = git(repoRoot, ['rev-parse', '--verify', '--quiet', NOTES_REF]).out || null;
+  const listed = git(repoRoot, ['notes', `--ref=${NOTES_REF}`, 'list']).out.split('\n').map(l => l.split(' ')[1]).filter(Boolean);
+  const removed: string[] = [];
+  const missing: string[] = [];
+  const failed: string[] = [];
+  const restore = () => { if (before) git(repoRoot, ['update-ref', NOTES_REF, before]); };
+  for (const name of names) {
+    const blob = git(repoRoot, ['hash-object', '--stdin'], undefined, name).out;
+    if (!listed.includes(blob)) { missing.push(name); continue; }
+    if (git(repoRoot, ['notes', `--ref=${NOTES_REF}`, 'remove', blob], notesEnv()).ok) removed.push(name); else failed.push(name);
+  }
+  if (failed.length) { restore(); return { removed: [], missing, failed, pushed: false, lease, detail: `git notes remove failed for ${failed.join(', ')}; the local notes ref was restored` }; }
+  if (!removed.length) return { removed, missing, failed, pushed: false, lease, detail: 'no note to remove' };
+  const p = git(repoRoot, ['push', '-q', lease ? `--force-with-lease=${NOTES_REF}:${lease}` : `--force-with-lease=${NOTES_REF}`, remote, `${NOTES_REF}:${NOTES_REF}`]);
+  if (!p.ok) restore();
+  return { removed, missing, failed, pushed: p.ok, lease, detail: p.ok ? `notes pushed to ${remote} ${NOTES_REF} (lease ${lease?.slice(0, 12) ?? 'new ref'})` : `git push ${NOTES_REF} rejected: ${p.err.replace(/\s+/g, ' ').trim().slice(0, 160)}; the local notes ref was restored` };
 }
 
 /** Rebuild local records from the notes ref: a note whose record is missing locally, or newer than the local copy, is written. */
