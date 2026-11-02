@@ -19,8 +19,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { canonicalRows, parseReceipt, parseRecordFindings, parseReviewResult, type CanonicalFinding } from './autoplan-reconcile';
-import { amendmentSteps, applyGuidance, closeDeferred, closePhase, finishGate } from './autoplan-gate';
-import { carryLines } from './autoplan-carry';
+import { amendmentSteps, applyGuidance, closeDeferred, closePhase } from './autoplan-gate';
+import { finishRun } from './autoplan-ceo-only';
+import type { ShadowSwitch } from './autoplan-shadow';
 import { GSTACK_VERSION } from './autoplan-migrate';
 import { driftLine, normalizeFindingFile, reviewHash, scaffold } from './autoplan-plan-text';
 import { PHASES, SNAPSHOT_TOOL, attemptFile, bindPromptResult, detectScope, driverFile, extractHeading, phaseOrder, reviewSkillFile, scopeLines, scopeSourceLabel, sectionLoadFor, snapshotTool, writePrompts, type Phase, type Scope, type ScopeFlags } from './autoplan-prompts';
@@ -38,14 +39,18 @@ import { annotateConfirm, confirmBlock } from './autoplan-confirm';
 /** An unreadable run.lock younger than this is a lock some other gstack is still writing, never a stale one. */
 const LOCK_WRITE_GRACE_MS = 30_000;
 
-/** Exclusive ownership for one command: a lock whose pid is alive is never stolen; a dead pid's lock is reclaimed. */
-export function withRunLock<T>(out: string, fn: () => T, opts: { steal?: boolean } = {}): T {
+/**
+ * Exclusive ownership for one command: a lock whose pid is alive is never stolen; a dead pid's lock is reclaimed.
+ * `waitMs`: retry a live owner's lock for that long before RUN_LOCKED (the shadow's publishing step, lib/autoplan-shadow.ts).
+ */
+export function withRunLock<T>(out: string, fn: () => T, opts: { steal?: boolean; waitMs?: number } = {}): T {
+  const waitUntil = Date.now() + (opts.waitMs ?? 0);
   fs.mkdirSync(out, { recursive: true });
   const lock = path.join(out, FILES.lock);
   const mine = JSON.stringify({ pid: process.pid, host: os.hostname(), at: now() });
   const staged = `${lock}.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
   fs.writeFileSync(staged, mine);
-  for (let i = 0; ; i++) {
+  for (let reclaims = 0; ;) {
     try {
       fs.linkSync(staged, lock);
       fs.unlinkSync(staged);
@@ -61,9 +66,10 @@ export function withRunLock<T>(out: string, fn: () => T, opts: { steal?: boolean
       } else if (owner.host === os.hostname() && typeof owner.pid === 'number') {
         try { process.kill(owner.pid, 0); alive = true; } catch (k: any) { alive = k.code === 'EPERM'; }
       } else if (owner.host && owner.host !== os.hostname()) alive = !opts.steal;
+      if (alive && Date.now() < waitUntil) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); continue; }
       if (alive) { fs.rmSync(staged, { force: true }); throw new RunError('RUN_LOCKED', unreadable ? `${lock} is being written by another command` : `pid ${owner.pid} on ${owner.host} since ${owner.at}`, 3); }
       try { fs.unlinkSync(lock); } catch { /* raced with its owner's exit */ }
-      if (i > 50) { fs.rmSync(staged, { force: true }); throw new RunError('RUN_LOCKED', `could not reclaim ${lock}`, 3); }
+      if (++reclaims > 50) { fs.rmSync(staged, { force: true }); throw new RunError('RUN_LOCKED', `could not reclaim ${lock}`, 3); }
     }
   }
   try { return fn(); } finally { try { if (fs.readFileSync(lock, 'utf8') === mine) fs.unlinkSync(lock); } catch { /* already gone */ } }
@@ -72,7 +78,7 @@ export function withRunLock<T>(out: string, fn: () => T, opts: { steal?: boolean
 // ---------------------------------------------------------------------------
 // init
 // ---------------------------------------------------------------------------
-export interface InitOptions { plan: string; out: string; cwd: string; scope?: ScopeFlags; planHeading?: string; outsideEnabled?: boolean; spendCap?: number | null; sessionKind?: string; deadlineMin?: number; light?: boolean; runId?: string; scaffold?: boolean; maxRounds?: number; carryForward?: boolean; carryCheckCapUsd?: number }
+export interface InitOptions { plan: string; out: string; cwd: string; scope?: ScopeFlags; ceoOnly?: boolean; shadow?: ShadowSwitch; planHeading?: string; outsideEnabled?: boolean; spendCap?: number | null; sessionKind?: string; deadlineMin?: number; light?: boolean; runId?: string; scaffold?: boolean; maxRounds?: number; carryForward?: boolean; carryCheckCapUsd?: number }
 
 /** `lines` receives what init itself reports (SCAFFOLDED:). A plan with one section heading missing refuses, or with `scaffold` is reviewed from a scaffolded copy. */
 export function initRun(o: InitOptions, lines: string[] = []): RunState {
@@ -103,14 +109,14 @@ export function initRun(o: InitOptions, lines: string[] = []): RunState {
   const restore = path.join(out, FILES.restore);
   const init = snapshotTool(['init', source, active, restore], o.cwd);
   const scope = detectScope(active, o.cwd, o.scope ?? {}, path.resolve(o.plan));
-  const order = phaseOrder(scope);
+  const order: Phase[] = o.ceoOnly ? ['ceo'] : phaseOrder(scope);
   const run = o.runId ?? `${path.basename(out)}-${new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14)}`;
   // codex_reviews gates the outside voice here, before any dispatch: a refusal is a terminal not_run outcome per phase.
   const consent = (o.outsideEnabled ?? true) ? outsideConsent({ userInvoked: false }) : undefined;
   const consentMissing = consent && !consent.allowed ? consent.lines[0] : undefined;
   const sessionKind = o.sessionKind ?? process.env.GSTACK_SESSION_KIND ?? 'unattended';
   const phases: Record<string, PhaseState> = {};
-  for (const p of PHASES) if (!order.includes(p)) phases[p] = { skipped: scope.docs_only ? 'docs-only plan' : p === 'design' ? 'no UI scope detected' : 'no developer-facing scope detected', native: { status: 'skipped' }, outside: { status: 'skipped' } };
+  for (const p of PHASES) if (!order.includes(p)) phases[p] = { skipped: o.ceoOnly ? 'ceo-only run' : scope.docs_only ? 'docs-only plan' : p === 'design' ? 'no UI scope detected' : 'no developer-facing scope detected', native: { status: 'skipped' }, outside: { status: 'skipped' } };
   const state: RunState = {
     schema_version: 1, run, status: 'running', required_phases: order, phases, artifacts: {}, revision: 0, out,
     plan_source: init.sourcePlan, active_plan: init.activePlan, restore: init.restorePath, scope, phase_order: order,
@@ -120,12 +126,12 @@ export function initRun(o: InitOptions, lines: string[] = []): RunState {
     deviations: ['autoplan guard: not enforced by this host; publication order is unverified (GUARD_NOT_INSTALLED)'],
     ...(o.deadlineMin ? { deadline_at: new Date(Date.now() + o.deadlineMin * 60_000).toISOString() } : {}),
     ...(o.light ? { light: true } : {}),
-    gstack_version: GSTACK_VERSION, plan_input: input, scope_flags: { ...(o.scope ?? {}) },
+    ...(o.ceoOnly ? { ceo_only: true } : {}), ...(o.shadow ? { shadow: o.shadow } : {}), gstack_version: GSTACK_VERSION, plan_input: input, scope_flags: { ...(o.scope ?? {}) },
     ...(o.planHeading ? { plan_heading: o.planHeading } : {}), ...(scaffolded ? { scaffolded: true } : {}),
     ...(o.carryForward === false ? { carry_forward: false } : {}), ...(o.carryCheckCapUsd !== undefined ? { carry_check_cap_usd: o.carryCheckCapUsd } : {}),
   };
   fs.writeFileSync(path.join(out, 'timing.json'), JSON.stringify({ schema_version: 1, run, phases: [], started_at: now(), session_kind: state.session_kind }, null, 2) + '\n');
-  journal(out, { event: 'init', run, plan_source: source, scope, phase_order: order, ...(consentMissing ? { outside: 'not_run', reason: 'consent_missing' } : {}) });
+  journal(out, { event: 'init', run, plan_source: source, scope, phase_order: order, ...(o.ceoOnly ? { ceo_only: true } : {}), ...(o.shadow ? { shadow: o.shadow } : {}), ...(consentMissing ? { outside: 'not_run', reason: 'consent_missing' } : {}) });
   writeState(state);
   return state;
 }
@@ -198,7 +204,7 @@ export function nextStep(o: NextOptions): NextResult {
   const lines: string[] = [];
   const result: NextResult = { state, attempts: [], lines };
   if (state.status === 'incomplete' && state.stop) { lines.push(...stopLines(state)); return result; }
-  if (state.status === 'gate_pending' || state.status === 'complete' || state.status === 'incomplete' || state.status === 'refused') return result;
+  if (['gate_pending', 'complete', 'reviewed', 'incomplete', 'refused'].includes(state.status)) return result;
   if (state.deadline_at && Date.parse(state.deadline_at) < Date.now()) { state.status = 'interrupted'; writeState(state); lines.push(`DEADLINE: passed at ${state.deadline_at}`); return result; }
   const pending = pendingAmendments(state).map(a => a.decision);
   if (pending.length) {
@@ -210,7 +216,7 @@ export function nextStep(o: NextOptions): NextResult {
     lines.push(...closeDeferred(state, phase, { reason: `round cap: round ${roundOf(state, phase)} would pass max ${roundCap(state, phase)}`, by: 'runner', cause: 'cap' }).lines);
     phase = currentPhase(state);
   }
-  if (!phase) { finishGate(state); lines.push(...carryLines(state)); writeState(state); return result; }
+  if (!phase) { lines.push(...finishRun(state)); writeState(state); return result; }
   const first = !state.phase_order.some(p => state.phases[p]?.snapshot);
   openPhase(state, phase, o.cwd);
   const ps = state.phases[phase]!;
@@ -394,8 +400,9 @@ export function submitResult(o: SubmitOptions): SubmitResult {
 function closeAndAdvance(state: RunState, phase: Phase, reconcile?: string): string[] {
   const close = closePhase(state, phase, { overridesFile: reconcile });
   const gated = !currentPhase(state);
-  if (gated) finishGate(state); else state.status = 'running';
-  return [`PHASE_CLOSED: ${phase} confirmed=${close.consensus.confirmed}${close.consensus.unverified ? ` unverified=${close.consensus.unverified}` : ''} disagree=${close.consensus.disagree} new=${close.consensus.new} native_only=${close.consensus.native_only} coverage=${close.consensus.coverage}`, ...(gated ? carryLines(state) : [])];
+  const finished = gated ? finishRun(state) : [];
+  if (!gated) state.status = 'running';
+  return [`PHASE_CLOSED: ${phase} confirmed=${close.consensus.confirmed}${close.consensus.unverified ? ` unverified=${close.consensus.unverified}` : ''} disagree=${close.consensus.disagree} new=${close.consensus.new} native_only=${close.consensus.native_only} coverage=${close.consensus.coverage}`, ...finished];
 }
 
 /**
@@ -514,15 +521,15 @@ export function resumeRun(out: string): ResumeResult {
     if (ps.native?.status === 'completed' && voiceTerminal(ps.outside)) closePhase(state, phase, {});
   }
   const stopped = resumeStop(state);
-  const gated = !currentPhase(state) && !['gate_pending', 'amend_pending', 'complete', 'incomplete', 'refused'].includes(state.status);
-  if (gated) finishGate(state);
-  else if (state.status === 'interrupted' || state.status === 'running' || state.status === 'awaiting_result') {
+  const gated = !currentPhase(state) && !['gate_pending', 'amend_pending', 'complete', 'reviewed', 'incomplete', 'refused'].includes(state.status);
+  const finished = gated ? finishRun(state) : [];
+  if (!gated && (state.status === 'interrupted' || state.status === 'running' || state.status === 'awaiting_result')) {
     const anyOpen = state.phase_order.some(p => (['native', 'outside'] as const).some(v => openAttempt(voiceState(state, p, v))));
     state.status = anyOpen ? 'awaiting_result' : 'running';
   }
   journal(out, { event: 'resumed', unknown, rebound, status: state.status });
   writeState(state);
-  const lines = [...recovered, ...stopped, ...(gated ? carryLines(state) : []), `RESUMED: run=${state.run} status=${state.status} execution_unknown=${unknown.length} rebound=${rebound.length}`];
+  const lines = [...recovered, ...stopped, ...finished, `RESUMED: run=${state.run} status=${state.status} execution_unknown=${unknown.length} rebound=${rebound.length}`];
   for (const a of unknown) lines.push(`EXECUTION_UNKNOWN: ${a}`);
   return { state, unknown, rebound, lines };
 }
@@ -546,6 +553,6 @@ export function statusLines(state: RunState): string[] {
   for (const d of state.capped_deltas ?? []) lines.push(`CAPPED_DELTA: v${d.k} ${d.phase} +${d.added} -${d.removed} ${d.status}`);
   return lines;
 }
-export const TERMINAL: readonly RunStatus[] = ['complete', 'gate_pending', 'amend_pending', 'incomplete', 'refused', 'interrupted'];
+export const TERMINAL: readonly RunStatus[] = ['complete', 'reviewed', 'gate_pending', 'amend_pending', 'incomplete', 'refused', 'interrupted'];
 export { SNAPSHOT_TOOL, RunError, FILES, readState, writeState, readJournal, journal };
 export type { RunState, Voice, VoiceState, AttemptState };
