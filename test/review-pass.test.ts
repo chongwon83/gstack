@@ -2,7 +2,7 @@
  * GSTA-167 calls PR 2: the staged pass manifest (lib/review-pass.ts), its bin commands, and the
  * checked-in Capy pass program (lib/capy-review-pass.js) run against a fake host whose shell is real.
  */
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -94,20 +94,23 @@ describe('pass manifest', () => {
     expect(() => renderStage(d, 'specialists', texts, () => '')).toThrow(/cannot read audit\/plan's prompt file/);
   });
 
-  test('a brief over 1 MiB with invalid UTF-8 in its diff travels in bounded chunks that rejoin to the rendered sha', () => {
-    const m = manifest([{ role: 'outside-voice', name: 'outside-voice', effort: 'host', exclude: [] }]);
-    const diff = Buffer.concat([Buffer.from('+line \u00e9\n'.repeat(90_000)), Buffer.from([0xff, 0xfe, 0x0a]), Buffer.from('+"quoted" \\ back\n'.repeat(20_000))]).toString('utf8');
-    renderStage(m, 'voices', texts, () => diff);
+  // The outside voice now reads its diff from a file (test/review-depth-lean.test.ts), so a large brief here is an audit
+  // reader's prompt file carrying the same bytes.
+  test('a brief over 1 MiB with invalid UTF-8 in it travels in bounded chunks that rejoin to the rendered sha', () => {
+    const big = path.join(tmp('rp-big-'), 'plan.md');
+    fs.writeFileSync(big, Buffer.concat([Buffer.from('+line \u00e9\n'.repeat(90_000)), Buffer.from([0xff, 0xfe, 0x0a]), Buffer.from('+"quoted" \\ back\n'.repeat(20_000))]));
+    const m = manifest([], { extras: [{ name: 'plan', prompt_file: big }] });
+    renderStage(m, 'specialists', texts, () => '');
     const r = m.readers[0]!;
     const text = fs.readFileSync(r.file!, 'utf8');
     expect(Buffer.byteLength(text)).toBeGreaterThan(1024 * 1024);
     expect(r.chunks).toBe(chunkCount(text));
     let joined = '';
     for (let i = 0; i < r.chunks!; i++) {
-      const c = spawnSync(path.join(BIN, 'gstack-review-dispatch'), ['chunk', '--manifest', writeManifestFile(m), '--reader', 'outside-voice', '--index', String(i)], { encoding: 'utf8', timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
+      const c = spawnSync(path.join(BIN, 'gstack-review-dispatch'), ['chunk', '--manifest', writeManifestFile(m), '--reader', 'audit/plan', '--index', String(i)], { encoding: 'utf8', timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
       expect(c.status, c.stderr).toBe(0);
       const [head, body] = c.stdout.split('\n');
-      expect(head).toBe('BRIEF_CHUNK: reader=outside-voice index=' + i + ' of=' + r.chunks + ' sha256=' + r.sha256);
+      expect(head).toBe('BRIEF_CHUNK: reader=audit/plan index=' + i + ' of=' + r.chunks + ' sha256=' + r.sha256);
       expect(Buffer.byteLength(body!)).toBeLessThan(1024 * 1024);
       joined += JSON.parse(body!);
     }
@@ -126,7 +129,7 @@ function writeManifestFile(m: Manifest): string {
 /** A repository on a feature branch with enough runtime lines for a full plan. */
 function repo(): { dir: string; env: NodeJS.ProcessEnv } {
   const dir = tmp('rp-repo-');
-  const env = { ...process.env, PATH: BIN + path.delimiter + process.env.PATH, GSTACK_STATE_ROOT: path.join(dir, '.state'), GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+  const env = { ...process.env, PATH: BIN + path.delimiter + process.env.PATH, GSTACK_STATE_ROOT: path.join(dir, '.state'), GSTACK_SWEEP_ROOTS: dir, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
   const sh = (c: string) => { const r = spawnSync('bash', ['-c', c], { cwd: dir, env, encoding: 'utf8', timeout: 60_000 }); if (r.status !== 0) throw new Error(r.stderr); };
   sh("git init -q -b main && echo '{}' > package.json && mkdir src && echo 'export const a = 1;' > src/a.ts && echo .state > .gitignore && git add -A && git commit -qm base && git checkout -qb feat");
   sh('for i in $(seq 1 80); do echo "export const v$i = $i;" >> src/a.ts; done && git commit -qam feat');
@@ -144,18 +147,20 @@ function treeLine(dir: string): string {
   return tree.status === 0 && top.status === 0 ? `REVIEWED_TREE: ${tree.stdout.trim()} ${top.stdout.trim()}\n` : '';
 }
 const briefDir = (prompt: string) => /Workspace: the checkout under review is (.+?)\. Your shell and file tools/.exec(prompt)?.[1] ?? '';
-function host(dir: string, env: NodeJS.ProcessEnv, o: { output?: (title: string) => string; reportFrom?: (title: string) => string; fail?: (title: string) => boolean; reject?: (title: string) => boolean; createThrows?: (title: string) => 'before' | 'after' | undefined; pollsToFinish?: number; lateSummary?: boolean } = {}) {
+function host(dir: string, env: NodeJS.ProcessEnv, o: { output?: (title: string) => string; reportFrom?: (title: string) => string; fail?: (title: string) => boolean; reject?: (title: string) => boolean; createThrows?: (title: string) => 'before' | 'after' | undefined; pollsToFinish?: number; lateSummary?: boolean; hang?: (title: string) => boolean; stopped?: (title: string) => boolean; keepSummary?: boolean; epoch?: number } = {}) {
   let clock = 0;
   const subs = new Map<string, Sub>();
   const creates: Sub[] = [];
   const starts: number[][] = [];
+  const stops: string[] = [];
   const reply = (s: Sub) => treeLine(o.reportFrom?.(s.title) ?? briefDir(s.prompt)) + (o.output?.(s.title) ?? cleanReply(s.title));
   const advance = () => {
     for (const s of subs.values()) {
       if (s.late && !s.summary) { s.summary = reply(s); continue; }
-      if (s.status !== 'working') continue;
+      if (s.status !== 'working' || o.hang?.(s.title)) continue;
       if (++s.polls < (o.pollsToFinish ?? 1)) continue;
-      if (o.fail?.(s.title)) s.status = 'failed';
+      if (o.stopped?.(s.title)) { s.status = 'stopped'; if (o.keepSummary) s.summary = reply(s); }
+      else if (o.fail?.(s.title)) { s.status = 'failed'; if (o.keepSummary) s.summary = reply(s); }
       else if (o.lateSummary && !s.late) { s.status = 'done'; s.late = true; }
       else { s.status = 'done'; s.summary = reply(s); }
     }
@@ -185,10 +190,11 @@ function host(dir: string, env: NodeJS.ProcessEnv, o: { output?: (title: string)
       start: async ({ indices, model }: { indices: number[]; model?: unknown }) => { starts.push(indices); for (const i of indices) { const s = subs.get(String(i))!; s.status = 'working'; if (model) s.model = model; } return { started: indices.map(index => ({ index })), rejected: [] }; },
       list: async () => { advance(); return { tasks: [...subs].map(([p, s]) => ({ path: p, title: s.title, status: s.status })), total: subs.size }; },
       get: async ({ path: p }: { path: string }) => ({ path: p, status: subs.get(p)!.status, summary: subs.get(p)!.summary }),
+      stop: async ({ paths }: { paths: string[] }) => { stops.push(...paths); for (const p of paths) subs.get(p)!.status = 'stopped'; return { results: paths.map(p => ({ path: p, ok: true })) }; },
     },
     thread: { get: async () => ({ cost: { tokens: 1000 + clock, credits: 1 + clock / 1000 } }) },
   };
-  return { tools, subs, creates, starts, sleep: async (ms: number) => { clock += ms; }, now: async () => 1_000_000 + clock };
+  return { tools, subs, creates, starts, stops, sleep: async (ms: number) => { clock += ms; }, now: async () => (o.epoch ?? 1_000_000) + clock };
 }
 
 const PROGRAM = fs.readFileSync(path.join(ROOT, 'lib/capy-review-pass.js'), 'utf8');
@@ -353,6 +359,34 @@ describe('Capy pass program (fake host, real bins)', () => {
     expect(Object.keys(m.log_starts ?? {}).sort()).toEqual(['pass:review', 'voices:adversarial-review']);
   }, 240_000);
 
+  // Value: protects=Step 11 on its own --out (the head moved after a fix round) renders and sends only the voices, so its ledger verifies clean; fails_when=pass renders the plan's first and specialists stages for a voices-only program, leaving BRIEF specialist-batched NOT_SENT in the ledger;
+  //   why_new=GST-1368 (gstack-evals#208 at fb407fb: VERIFY: dirty briefs=4 outputs=3); seam=none; no_claim=which plan flags Step 11 takes
+  test('Step 11 on a fresh --out renders only the voices, and its ledger verifies clean', async () => {
+    const { dir, env } = repo();
+    const out = path.join(dir, '.state/run/s11');
+    const h = host(dir, env);
+    const models = { 'outside-voice': { model_id: 'openai/gpt-6.1-sol' } };
+    const res = await runPass(h, { base: 'main', out, pass: 'x7s11', planFlags: ['--depth-floor', 'full'], stage: 'voices', models });
+    expect(res).toContain('NEXT: judge the voices');
+    const m = JSON.parse(fs.readFileSync(path.join(out, 'pass-manifest.json'), 'utf8')) as Manifest;
+    fs.writeFileSync(path.join(out, 'judged.jsonl'), '');
+    expect(bin(dir, env, ['judge', '--ledger', m.ledger, '--merged', m.merged, '--judged', path.join(out, 'judged.jsonl')]).status).toBe(0);
+    const v = bin(dir, env, ['verify', '--ledger', m.ledger]);
+    expect(v.stdout).not.toContain('NOT_SENT');
+    expect(v.stdout).toContain('VERIFY: clean briefs=' + m.readers.length);
+    expect(m.readers.length).toBeGreaterThan(0);
+    expect(m.readers.every(r => r.stage === 'voices' && r.state === 'collected')).toBe(true);
+    expect(h.creates.map(c => c.title).sort()).toEqual(m.readers.map(r => r.title).sort());
+    const rendered = fs.readFileSync(m.ledger, 'utf8').trim().split('\n').map(l => JSON.parse(l)).filter(e => e.event === 'rendered').map(e => e.reader);
+    expect(rendered.sort()).toEqual(m.readers.map(r => r.reader).sort());
+    const reviewer = bin(dir, env, ['pass', '--base', 'main', '--out', out, '--pass', 'x7s11', '--', '--depth-floor', 'full']);
+    expect([reviewer.status === 0, reviewer.stderr]).toEqual([false, expect.stringContaining("holds only Step 11's voices")]);
+    const extras = path.join(dir, '.state/extras.json');
+    fs.writeFileSync(extras, JSON.stringify([{ name: 'plan', prompt_file: path.join(dir, 'package.json') }]));
+    const audit = bin(dir, env, ['pass', '--base', 'main', '--out', path.join(dir, '.state/run/s11x'), '--pass', 'x7s11x', '--voices', '--extras', extras, '--', '--depth-floor', 'full']);
+    expect([audit.status === 0, audit.stderr]).toEqual([false, expect.stringContaining("Step 11's voices pass sends no audit reader")]);
+  }, 240_000);
+
   test('Step 11 voices run from the same manifest; the outside voice needs a model of another family', async () => {
     const { dir, env } = repo();
     const out = path.join(dir, '.state/run/p1');
@@ -362,7 +396,9 @@ describe('Capy pass program (fake host, real bins)', () => {
     expect(await runPass(h, { ...base, stage: 'voices', laneModel: undefined })).toContain("STOP: the outside voice needs input.models['outside-voice']");
     expect(h.creates.some(c => c.title.startsWith('ship x7p1 ') && /adversarial|outside/.test(c.title))).toBe(false);
     const models = { 'outside-voice': { model_id: 'openai/gpt-6.1-sol' }, 'adversarial-native': { model_id: 'anthropic/claude-opus-5-5', reasoning_mode: 'high' } };
-    expect(await runPass(h, { ...base, stage: 'voices', models })).toContain('NEXT: judge the voices');
+    const voices = await runPass(h, { ...base, stage: 'voices', models });
+    expect(voices).toContain('NEXT: judge the voices');
+    expect(voices).toContain('OUTSIDE_RECORD: "outside_provider":"host-subagent","outside_model":"openai/gpt-6.1-sol","outside_status":"completed"');
     expect(h.creates.find(c => c.title === 'ship x7p1 outside-voice')!.model).toEqual(models['outside-voice']);
     expect(h.creates.find(c => c.title === 'ship x7p1 adversarial-native')!.model).toEqual(models['adversarial-native']);
   }, 240_000);
@@ -489,6 +525,89 @@ describe('Capy pass program (fake host, real bins)', () => {
     for (const t of Object.keys(named.models)) if (t !== 'ship x17p1 outside-voice') expect(over.models[t]).toEqual(named.models[t]);
   }, 300_000);
 
+  // Value: protects=GST-1104 (TRUT-7, truther#1159): an outside voice that runs past the stuck limit, or ends stopped or failed with no result, is stopped and recorded as unavailable coverage under its own runner and model, and Step 11 goes on to judge the native voice; fails_when=the stuck subagent is left running (TRUT-7 p2 burned 16.9M tokens before anyone stopped it), the pass stops with nothing recorded, or the returned record names no host-subagent runner so the review-log row falls back to the template's codex;
+  //   why_new=GST-1104; seam=lib/capy-review-pass.js reader poll; no_claim=which outside model Step 11 picks
+  test('an outside voice that hangs or stops with no result is stopped and recorded unavailable as the host subagent, and Step 11 goes on (GST-1104)', async () => {
+    for (const [pass, o] of [['x30p1', { hang: (t: string) => t.endsWith('outside-voice') }], ['x31p1', { stopped: (t: string) => t.endsWith('outside-voice') }], ['x32p1', { fail: (t: string) => t.endsWith('outside-voice') }]] as const) {
+      const { dir, env } = repo();
+      const out = path.join(dir, '.state/run/p1');
+      const h = host(dir, env, { ...o, epoch: Date.now() });
+      const base = { base: 'main', out, pass, planFlags: ['--depth-floor', 'full'] };
+      expect(await runPass(h, base)).toContain('NEXT: judge (Phase 4)');
+      let res = '';
+      for (let i = 0; i < 6; i++) {
+        res = await runPass(h, { ...base, stage: 'voices', stuckMs: 60_000 });
+        if (!res.includes('NEXT: poll')) break;
+      }
+      expect(res).not.toContain('STOP:');
+      expect(res).toContain('COLLECT_UNAVAILABLE: reader=outside-voice');
+      expect(res).toContain('OUTSIDE_RECORD: "outside_provider":"host-subagent","outside_model":"openai/gpt-6.1-sol","outside_status":"unavailable"');
+      expect(res).toContain('first write this voice its own adversarial-review row with "source":"host-subagent","status":"unavailable","completed":false,"converged":false and no --finish, then the native row');
+      expect(res).toContain('NEXT: judge the voices');
+      if ('hang' in o) {
+        const token = /REVIEW_LOG_START: adversarial-review token=(\S+)/.exec(res)![1]!;
+        const record = /OUTSIDE_RECORD: (\S+)/.exec(res)![1]!;
+        const log = (row: string, a: string[] = []) => spawnSync(path.join(BIN, 'gstack-review-log'), [row, ...a], { cwd: dir, env, encoding: 'utf8', timeout: 60_000 });
+        expect(log('{"skill":"adversarial-review","status":"unavailable","source":"host-subagent",' + record + ',"phase":"adversarial","completed":false,"converged":false}').status).toBe(0);
+        expect(log('{"skill":"adversarial-review","status":"clean","source":"in-host",' + record + ',"phase":"adversarial","completed":true,"converged":true}', ['--finish', token]).status).toBe(0);
+        const rows = spawnSync(path.join(BIN, 'gstack-review-read'), [], { cwd: dir, env, encoding: 'utf8', timeout: 60_000 }).stdout.split('---CONFIG---')[0]!.trim().split('\n').map(l => JSON.parse(l));
+        expect(rows.map(r => [r.source, r.outside_provider, r.outside_status, r.converged])).toEqual([['host-subagent', 'host-subagent', 'unavailable', false], ['in-host', 'host-subagent', 'unavailable', true]]);
+        expect(rows[1].review_freshness).toMatchObject({ status: 'CURRENT' });
+      }
+      const ov = [...h.subs].find(([, s]) => s.title === 'ship ' + pass + ' outside-voice')!;
+      expect(ov[1].status).not.toBe('working');
+      expect(h.stops).toEqual('hang' in o ? [ov[0]] : []);
+      const v = bin(dir, env, ['verify', '--ledger', path.join(out, 'review-ledger.jsonl')]);
+      expect(v.stdout).toMatch(/^BRIEF outside-voice UNAVAILABLE/m);
+      expect(v.stdout).not.toContain('MISMATCH');
+      expect(v.stdout).toContain('unavailable=1');
+    }
+  }, 600_000);
+
+  // Value: protects=GST-1104 review finding: an outside voice that wrote its report and then ended stopped or failed is collected from its summary, never replaced by unavailable coverage; fails_when=the pass records the voice unavailable without reading the summary, silently dropping its findings;
+  //   why_new=GST-1104 /ship review (three readers); seam=lib/capy-review-pass.js reader poll; no_claim=what the voice found
+  test('an outside voice that ends stopped or failed with a report is collected, not marked unavailable (GST-1104)', async () => {
+    for (const [pass, o] of [['x33p1', { stopped: (t: string) => t.endsWith('outside-voice') }], ['x34p1', { fail: (t: string) => t.endsWith('outside-voice') }]] as const) {
+      const { dir, env } = repo();
+      const out = path.join(dir, '.state/run/p1');
+      const h = host(dir, env, { ...o, keepSummary: true, output: (t: string) => (t.endsWith('outside-voice') ? '1. **A guard fails open** - `src/a.ts:1` accepts any input. Severity: Medium. Blocks: no.\n\nRecommendation: fix the guard because it fails open' : cleanReply(t)), epoch: Date.now() });
+      const base = { base: 'main', out, pass, planFlags: ['--depth-floor', 'full'] };
+      expect(await runPass(h, base)).toContain('NEXT: judge (Phase 4)');
+      let res = '';
+      for (let i = 0; i < 6; i++) {
+        res = await runPass(h, { ...base, stage: 'voices', stuckMs: 60_000 });
+        if (!res.includes('NEXT: poll')) break;
+      }
+      expect(res).not.toContain('STOP:');
+      expect(res).not.toContain('COLLECT_UNAVAILABLE: reader=outside-voice');
+      expect(res).toContain('OUTSIDE_RECORD: "outside_provider":"host-subagent","outside_model":"openai/gpt-6.1-sol","outside_status":"completed"');
+      expect(res).toContain('NEXT: judge the voices');
+    }
+  }, 600_000);
+
+  // Value: protects=GST-1104 review finding: an outside voice that ends stopped or failed with a summary that is not a review is recorded unavailable and Step 11 goes on; fails_when=collect's COLLECT_NOT_REVIEWED stops the pass and every rerun stops the same way;
+  //   why_new=GST-1104 /ship review round 2; seam=lib/capy-review-pass.js reader collect; no_claim=what the summary says
+  test('an outside voice that ends stopped with a non-review summary is recorded unavailable, not a stuck pass (GST-1104)', async () => {
+    const { dir, env } = repo();
+    const out = path.join(dir, '.state/run/p1');
+    const h = host(dir, env, { stopped: (t: string) => t.endsWith('outside-voice'), keepSummary: true, output: (t: string) => (t.endsWith('outside-voice') ? 'Stopped before I could read the diff.' : cleanReply(t)), epoch: Date.now() });
+    const base = { base: 'main', out, pass: 'x35p1', planFlags: ['--depth-floor', 'full'] };
+    expect(await runPass(h, base)).toContain('NEXT: judge (Phase 4)');
+    let res = '';
+    for (let i = 0; i < 6; i++) {
+      res = await runPass(h, { ...base, stage: 'voices', stuckMs: 60_000 });
+      if (!res.includes('NEXT: poll')) break;
+    }
+    expect(res).not.toContain('STOP:');
+    expect(res).toContain('COLLECT_UNAVAILABLE: reader=outside-voice');
+    expect(res).toContain('"outside_status":"unavailable"');
+    expect(res).toContain('NEXT: judge the voices');
+    const v = bin(dir, env, ['verify', '--ledger', path.join(out, 'review-ledger.jsonl')]);
+    expect(v.stdout).toMatch(/^BRIEF outside-voice UNAVAILABLE/m);
+    expect(v.stdout).not.toContain('MISMATCH');
+    expect(v.stdout).not.toContain('NOT_REVIEWED');
+  }, 300_000);
+
   test('an audit reader marked first settles before any specialist starts; its output is returned, never merged', async () => {
     const { dir, env } = repo();
     const out = path.join(dir, '.state/run/p1');
@@ -586,6 +705,29 @@ describe('Capy pass program (fake host, real bins)', () => {
     expect(res).toContain('NEXT: apply the docs audit (Step 14.5)');
     expect(bin(dir, env, ['pass', '--base', 'main', '--out', path.join(dir, '.state/run/d2'), '--pass', 'x16b', '--audit-only']).status).not.toBe(0);
   }, 240_000);
+
+  // Value: protects=a pass id typed in capitals is read as its lowercase id, so the manifest, its titles and a resume agree, and an id with other characters is still refused naming the rule; fails_when=--pass P1 is refused as a missing flag (gstack-evals#191 /ship), a capitalized resume of p1 reads as another pass, or p_1 is accepted;
+  //   why_new=the id was matched case-sensitively and its refusal read as a missing flag; seam=gstack-review-dispatch pass; no_claim=the reviewer plan, which --audit-only skips
+  test('pass reads its id as lowercase; an id with other characters is still refused with the rule', () => {
+    const { dir, env } = repo();
+    const out = path.join(dir, '.state/run/docs');
+    fs.mkdirSync(out, { recursive: true });
+    fs.writeFileSync(path.join(out, 'docs.prompt.md'), 'Run Step 14.5 as written.\n');
+    const extras = path.join(dir, '.state/extras.json');
+    fs.writeFileSync(extras, JSON.stringify([{ name: 'docs', prompt_file: path.join(out, 'docs.prompt.md'), first: true }]));
+    const args = (id: string) => ['pass', '--base', 'main', '--out', out, '--pass', id, '--audit-only', '--extras', extras];
+    const upper = bin(dir, env, args('Docs-P1'));
+    expect(upper.status, upper.stderr).toBe(0);
+    expect(upper.stdout).toContain(`MANIFEST: file=${path.join(out, 'pass-manifest.json')} pass=docs-p1 readers=1 audit-only`);
+    const m = JSON.parse(fs.readFileSync(path.join(out, 'pass-manifest.json'), 'utf8'));
+    expect([m.pass, m.readers[0].title]).toEqual(['docs-p1', 'ship docs-p1 audit/docs']);
+    const resumed = bin(dir, env, args('docs-p1'));
+    expect([resumed.status, resumed.stdout.includes('pass=docs-p1 readers=1 resumed')]).toEqual([0, true]);
+    for (const bad of ['p_1', 'p 1', 'p1/']) {
+      const r = bin(dir, env, args(bad));
+      expect([r.status, r.stderr.trim()]).toEqual([2, `gstack-review-dispatch pass: --pass ${JSON.stringify(bad)} is not a pass id: use letters, digits and dashes (read as lowercase, so P1 is p1)`]);
+    }
+  }, 120_000);
 
   test('Step 11 notes its own growth from its first dispatch, not from the pass\'s starting reading', async () => {
     const { dir, env } = repo();
@@ -706,6 +848,21 @@ describe('Capy pass program (fake host, real bins)', () => {
     expect(v).toMatch(/^OUTPUT fix-check MATCH /m);
   }, 240_000);
 
+  // Value: protects=decision 3.5's fix-check takes a review-fix-check start token even when the parent passes the Capy skill's
+  //   logStart ["review"], so its row is never a pass and a review_loop_exception can follow it; fails_when=the fix-check pass logs a
+  //   review start; why_new=ggstack#52 (GST-1031): a scoped fix-check logged as review counted as a second pass; seam=the pass program;
+  //   no_claim=what the parent writes in the row
+  test('a fix-check pass given logStart ["review"] takes the review-fix-check start', async () => {
+    const { dir, env } = repo();
+    const files = path.join(dir, '.state/fc');
+    fs.mkdirSync(files, { recursive: true });
+    const fc: Record<string, string> = {};
+    for (const [k, v] of [['fix_list', '1. src/a.ts: guard v80\n'], ['hunks', 'diff --git a/src/a.ts b/src/a.ts\n+export const v81 = 81;\n'], ['tests', 'bun test: 3 pass, 0 fail\n']]) { fc[k] = path.join(files, k + '.txt'); fs.writeFileSync(fc[k]!, v!); }
+    const res = await runPass(host(dir, env), { base: 'main', out: path.join(dir, '.state/run/fcr'), pass: 'x52fc', planFlags: ['--pass', '1', '--last', 'full', '--fixed-below'], fixCheck: fc, logStart: ['review'] });
+    expect(res).toMatch(/REVIEW_LOG_START: review-fix-check token=\S+/);
+    expect(res).not.toMatch(/REVIEW_LOG_START: review token=/);
+  }, 240_000);
+
   test('Step 11 records one start per row it logs, even when two rows share a skill (native and outside adversarial-review)', async () => {
     const { dir, env } = repo();
     const out = path.join(dir, '.state/run/p1');
@@ -738,6 +895,26 @@ describe('Capy pass program (fake host, real bins)', () => {
     expect(cli.status, cli.stderr).toBe(0);
     expect(h.creates.find(c => c.title === 'ship x21p2 specialist-batched')!.prompt).toBe(fs.readFileSync(path.join(dir, '.state/cli/specialist-batched.prompt.md'), 'utf8'));
     expect(h.creates.find(c => c.title === 'ship x21p2 red-team')!.prompt).toContain('DIFF_BASE=' + rangeBase);
+  }, 240_000);
+
+  // Value: protects=the pass program dispatches the owner's granted fix-check from the plan, as decision 3.5 runs any fix-check, instead of PASS: none; fails_when=a recorded grant still prints PASS: none next=stop and the lane renders, sends and collects the fix-check by hand (C6-36 after-opus-grant);
+  //   why_new=GST-967; seam=the pass program; no_claim=the fix-check reviewer's verdict
+  test('GST-967: a recorded grant after round 2 runs its one scoped fix-check through the program', async () => {
+    const { dir, env } = repo();
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8', timeout: 10_000 }).stdout.trim();
+    const add = spawnSync(path.join(BIN, 'gstack-approvals'), ['add', '--ask', `Owner grant: one scoped fix-check after round 2 (review_loop_grant ${head.slice(0, 12)})`, '--words', 'one scoped fix-check after round 2', '--by', 'GStack Minder', '--scope', 'this /ship invocation', '--json'], { cwd: dir, env: { ...env, GSTACK_APPROVALS_MIRROR: '0' }, encoding: 'utf8', timeout: 60_000 });
+    expect(add.status, add.stderr).toBe(0);
+    const id = JSON.parse(add.stdout).added[0] as string;
+    const files = path.join(dir, '.state/gfc');
+    fs.mkdirSync(files, { recursive: true });
+    const fc: Record<string, string> = {};
+    for (const [k, v] of [['fix_list', '1. src/a.ts: guard v80\n'], ['hunks', 'diff --git a/src/a.ts b/src/a.ts\n+export const v81 = 81;\n'], ['tests', 'bun test: 3 pass, 0 fail\n'], ['callers', 'none\n']]) { fc[k] = path.join(files, k + '.txt'); fs.writeFileSync(fc[k]!, v!); }
+    const h = host(dir, env);
+    const res = await runPass(h, { base: 'main', out: path.join(dir, '.state/run/gfc'), pass: 'x30gfc', planFlags: ['--pass', '2', '--last', 'full', '--fixed-blocking', '--range-base', head, '--grant', id], fixCheck: fc, logStart: ['review-fix-check'] });
+    expect(res).not.toContain('PASS: none');
+    expect(res).toContain(`NEXT: fix-check (the owner's grant ${id}`);
+    expect(h.creates.map(c => c.title)).toEqual(['ship x30gfc fix-check']);
+    expect(res).toContain('NEXT: judge (Phase 4)');
   }, 240_000);
 
   // Value: protects=the Capy pass program runs a scoped repeat with no fix-check files, dispatches its Red Team and leaves the fix-check to Step 3.5 as GST-619 does on the CLI; fails_when=the program stops a scoped plan for missing files or creates a fix-check reader in the scoped manifest;
@@ -901,7 +1078,9 @@ describe('a scoped pass after a blocker fix (GST-619)', () => {
     expect(redTeam).not.toContain(s.mergeBase);
     expect(bin(s.dir, s.env, ['stage', '--manifest', s.mf, '--stage', 'voices']).status).toBe(0);
     const voices = JSON.parse(fs.readFileSync(s.mf, 'utf8')) as Manifest;
-    expect(fs.readFileSync(voices.readers.find(r => r.reader === 'outside-voice')!.file!, 'utf8')).toContain('+export const v1 = 1;');
+    const outsideBrief = voices.readers.find(r => r.reader === 'outside-voice')!.file!;
+    expect(fs.readFileSync(outsideBrief, 'utf8')).toContain(`The supplied branch diff is the file ${path.join(path.dirname(outsideBrief), 'outside-voice.diff')} `);
+    expect(fs.readFileSync(path.join(path.dirname(outsideBrief), 'outside-voice.diff'), 'utf8')).toContain('+export const v1 = 1;');
     const again = bin(s.dir, s.env, s.args);
     expect(again.status, again.stdout + again.stderr).toBe(0);
     expect(again.stdout).toMatch(/^FIX_CHECK: planned effort=full /m);
@@ -1072,6 +1251,159 @@ describe('readers on a shared machine review the checkout the pass ships (GST-48
     expect(res).toContain('NEXT: judge the voices');
     const v = bin(wt, env, ['verify', '--ledger', path.join(out, 'review-ledger.jsonl')]).stdout;
     expect(v).toMatch(/^BRIEF outside-voice UNAVAILABLE /m);
+  }, 240_000);
+});
+
+describe('the fetch sweep quarantines a stage that fetched (GST-1322 PR B)', () => {
+  const clone = (at: string) => { fs.mkdirSync(at, { recursive: true }); expect(spawnSync('bash', ['-c', 'git init -q && git remote add origin https://github.com/sealed-org/BEAM.git'], { cwd: at, encoding: 'utf8', timeout: 30_000 }).status).toBe(0); };
+  const made: string[] = [];
+  afterAll(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
+  // Value: protects=a stage whose reader cloned a network repository is quarantined (reply out of merged.jsonl and the Red Team brief), reruns once as <reader>#2, and verifies clean only after the rerun sweeps clean; fails_when=the sweep runs outside the stage window, the quarantined findings reach the Red Team, or verify certifies the first attempt;
+  //   why_new=gbrain-evals #362 (an unprompted 4.2 GB clone by a reader); seam=lib/capy-review-pass.js stage boundaries; no_claim=which reader of the stage fetched (Capy exposes no reader id)
+  test('a clone during the specialists stage quarantines it, blocks the rerun while the clone exists, then reruns each slot once and verifies clean', async () => {
+    const { dir, env } = repo();
+    made.push(dir);
+    const out = path.join(dir, '.state/run/p1');
+    const beam = path.join(dir, '.state/BEAM');
+    const h = host(dir, env, { output: t => { if (t === 'ship f1p1 specialist-batched') { clone(beam); return 'High: src/a.ts:3 SEALED-QUOTE leaked from the clone'; } return 'NO FINDINGS'; } });
+    const blocked = await runPass(h, { base: 'main', out, pass: 'f1p1', planFlags: ['--depth-floor', 'full'] });
+    expect(blocked).toContain('FETCH_VIOLATION: stage=specialists attempt=1 kind=repo path=' + "'" + fs.realpathSync(beam) + "'");
+    expect(blocked).toContain('KEEP: ' + "'" + fs.realpathSync(beam) + "'");
+    expect(blocked).toMatch(/^RERUN: stage=specialists readers=\S*specialist-batched#2/m);
+    expect(blocked).toContain('FETCH_RERUN_BLOCKED: stage=specialists attempt=2 path=' + "'" + fs.realpathSync(beam) + "'");
+    expect(h.creates.map(c => c.title)).not.toContain('ship f1p1 specialist-batched#2');
+    fs.rmSync(beam, { recursive: true, force: true });
+    const res = await runPass(h, { base: 'main', out, pass: 'f1p1', planFlags: ['--depth-floor', 'full'] });
+    expect(res).toContain('NEXT: judge (Phase 4)');
+    const m = JSON.parse(fs.readFileSync(path.join(out, 'pass-manifest.json'), 'utf8')) as Manifest;
+    const first = m.readers.find(r => r.reader === 'specialist-batched')!;
+    expect(first.superseded_by).toBe('specialist-batched#2');
+    expect(fs.statSync(first.quarantined!.file).mode & 0o777).toBe(0o600);
+    expect(h.creates.map(c => c.title)).toContain('ship f1p1 specialist-batched#2');
+    expect(fs.existsSync(m.merged) ? fs.readFileSync(m.merged, 'utf8') : '').not.toContain('SEALED-QUOTE');
+    expect(h.creates.find(c => c.title === 'ship f1p1 red-team')!.prompt).not.toContain('SEALED-QUOTE');
+    expect(res).not.toContain('SEALED-QUOTE');
+    expect(m.sweeps?.specialists).toMatchObject({ attempt: 2, end: { verdict: 'clean' } });
+    expect(bin(dir, env, ['judge', '--ledger', m.ledger, '--merged', m.merged, '--judged', path.join(out, 'judged.jsonl')]).status).toBe(0);
+    const v = bin(dir, env, ['verify', '--ledger', m.ledger]);
+    expect(v.stdout).toMatch(/^FETCH f1p1\/specialists#1 RESOLVED found=1/m);
+    expect(v.stdout).toMatch(/^BRIEF specialist-batched SUPERSEDED .* quarantined$/m);
+    expect(v.stdout, v.stdout).toContain('VERIFY: clean');
+  }, 240_000);
+
+  // Value: protects=a rerun reader can never read what attempt 1 fetched and sweep clean: while any path attempt 1 found exists, the rerun dispatches no reader and verify keeps refusing;
+  //   fails_when=the #2 readers start beside the kept clone, sweep clean, and their findings (read from the clone) reach merged.jsonl with verify RESOLVED; why_new=ship-c-p1 red-team#2 (CRITICAL; the Captain's ruling C on #4011);
+  //   seam=gstack-review-dispatch sweep --phase start; no_claim=that the kept path is safe to keep
+  test('a rerun reader cannot open attempt 1\'s kept clone: the rerun start refuses, dispatches nothing and verify stays dirty', async () => {
+    const { dir, env } = repo();
+    made.push(dir);
+    const out = path.join(dir, '.state/run/p1');
+    const beam = path.join(dir, '.state/BEAM');
+    const h = host(dir, env, { output: t => { if (t === 'ship f3p1 specialist-batched') clone(beam); if (t === 'ship f3p1 specialist-batched#2' && fs.existsSync(beam)) return 'High: src/a.ts:3 SEALED-QUOTE read from the kept clone'; return 'NO FINDINGS'; } });
+    let res = await runPass(h, { base: 'main', out, pass: 'f3p1', planFlags: ['--depth-floor', 'full'] });
+    for (let i = 0; i < 4 && res.includes('NEXT: poll'); i++) res = await runPass(h, { base: 'main', out, pass: 'f3p1', planFlags: ['--depth-floor', 'full'] });
+    const kept = fs.realpathSync(beam);
+    expect(res).toContain("FETCH_RERUN_BLOCKED: stage=specialists attempt=2 path='" + kept + "'");
+    expect(res).toMatch(/STOP: gstack-review-dispatch sweep --stage specialists --phase start exited 3/);
+    expect(res).not.toContain('NEXT: judge');
+    expect(res).not.toContain('SEALED-QUOTE');
+    expect(h.creates.map(c => c.title)).not.toContain('ship f3p1 specialist-batched#2');
+    expect(fs.existsSync(beam)).toBe(true);
+    const m = JSON.parse(fs.readFileSync(path.join(out, 'pass-manifest.json'), 'utf8')) as Manifest;
+    expect(fs.existsSync(m.merged) ? fs.readFileSync(m.merged, 'utf8') : '').not.toContain('SEALED-QUOTE');
+    const v = bin(dir, env, ['verify', '--ledger', m.ledger]);
+    expect(v.status).toBe(1);
+    expect(v.stdout).toMatch(/^FETCH_VIOLATION: f3p1\/specialists#1 found=1/m);
+    expect(v.stdout).toContain('VERIFY: dirty');
+  }, 240_000);
+
+  // Value: protects=a fetch on the stage's one rerun stops the pass and verify refuses with FETCH_VIOLATION; a path that holds an older one is reported, never given a delete command; fails_when=the program reruns again, returns NEXT: judge, or prints rm -rf for the sweep root;
+  //   why_new=GST-1322 d3 (no unattended rm -rf) and d5 (one rerun per slot); seam=gstack-review-dispatch sweep --phase end; no_claim=who created the reported path
+  test('a fetch on the rerun stops the pass, verify refuses, and a root-level repository gets KEEP, never a delete command', async () => {
+    const { dir, env } = repo();
+    made.push(dir);
+    const out = path.join(dir, '.state/run/p1');
+    const h = host(dir, env, { output: t => { if (t === 'ship f2p1 specialist-batched') clone(path.join(dir, '.state/BEAM')); if (t === 'ship f2p1 specialist-batched#2') clone(path.join(dir, '.state')); return 'NO FINDINGS'; } });
+    let res = await runPass(h, { base: 'main', out, pass: 'f2p1', planFlags: ['--depth-floor', 'full'] });
+    expect(res).toContain('FETCH_RERUN_BLOCKED: stage=specialists attempt=2');
+    fs.rmSync(path.join(dir, '.state/BEAM'), { recursive: true, force: true });
+    res = await runPass(h, { base: 'main', out, pass: 'f2p1', planFlags: ['--depth-floor', 'full'] });
+    for (let i = 0; i < 4 && res.includes('NEXT: poll'); i++) res = await runPass(h, { base: 'main', out, pass: 'f2p1', planFlags: ['--depth-floor', 'full'] });
+    expect(res).toContain('FETCH_RERUN_SPENT: stage=specialists');
+    expect(res).toMatch(/STOP: gstack-review-dispatch sweep --stage specialists --phase end exited 3/);
+    expect(res).not.toContain('NEXT: judge');
+    const state = fs.realpathSync(path.join(dir, '.state'));
+    expect(res).toContain("KEEP: '" + state + "' (no transcript attributes it to a reader");
+    expect(res).not.toContain("rm -rf -- '" + state + "'");
+    expect(h.creates.filter(c => c.title.endsWith('#3'))).toHaveLength(0);
+    expect(h.creates.some(c => c.title === 'ship f2p1 red-team')).toBe(false);
+    const m = JSON.parse(fs.readFileSync(path.join(out, 'pass-manifest.json'), 'utf8')) as Manifest;
+    const v = bin(dir, env, ['verify', '--ledger', m.ledger]);
+    expect(v.status).toBe(1);
+    expect(v.stdout).toMatch(/^FETCH_VIOLATION: f2p1\/specialists#2 found=1/m);
+    expect(v.stdout).toContain('VERIFY: dirty');
+  }, 240_000);
+
+  // Value: protects=once a stage's rerun fetched too, resuming the same pass dispatches no later stage and returns no reader output;
+  //   fails_when=the resumed program skips the recorded end, dispatches the Red Team beside the kept clone and returns NEXT: judge; why_new=ship-c-p1 outside-voice#2 (High; the Captain's grant on #4011);
+  //   seam=lib/capy-review-pass.js stage selection; no_claim=that the kept path is safe to keep
+  test('resuming after FETCH_RERUN_SPENT stops before any later stage starts', async () => {
+    const { dir, env } = repo();
+    made.push(dir);
+    const out = path.join(dir, '.state/run/p1');
+    const input = { base: 'main', out, pass: 'f4p1', planFlags: ['--depth-floor', 'full'] };
+    const h = host(dir, env, { output: t => { if (t === 'ship f4p1 specialist-batched') clone(path.join(dir, '.state/BEAM')); if (t === 'ship f4p1 specialist-batched#2') clone(path.join(dir, '.state/BEAM2')); if (t === 'ship f4p1 red-team') return 'High: src/a.ts:3 SEALED-QUOTE read beside the kept clone'; return 'NO FINDINGS'; } });
+    let res = await runPass(h, input);
+    expect(res).toContain('FETCH_RERUN_BLOCKED: stage=specialists attempt=2');
+    fs.rmSync(path.join(dir, '.state/BEAM'), { recursive: true, force: true });
+    res = await runPass(h, input);
+    for (let i = 0; i < 4 && res.includes('NEXT: poll'); i++) res = await runPass(h, input);
+    expect(res).toContain('FETCH_RERUN_SPENT: stage=specialists');
+    const again = await runPass(h, input);
+    expect(again).toMatch(/STOP: .*FETCH_RERUN_SPENT/);
+    expect(again).not.toContain('NEXT: judge');
+    expect(again).not.toContain('SEALED-QUOTE');
+    expect(h.creates.some(c => c.title === 'ship f4p1 red-team')).toBe(false);
+  }, 240_000);
+
+  // Value: protects=while a path an earlier attempt found still exists, no reader of any stage, Step 11's voices included, starts beside it;
+  //   fails_when=the voices run on the same manifest dispatches its readers beside the kept clone while the specialists rerun is blocked; why_new=ship-c-p1 outside-voice#2 (High; the Captain's grant on #4011);
+  //   seam=gstack-review-dispatch sweep --phase start; no_claim=that the kept path is safe to keep
+  test('Step 11 voices dispatch nothing while another stage\'s rerun is blocked by a kept clone', async () => {
+    const { dir, env } = repo();
+    made.push(dir);
+    const out = path.join(dir, '.state/run/p1');
+    const base = { base: 'main', out, pass: 'f5p1', planFlags: ['--depth-floor', 'full'] };
+    const h = host(dir, env, { output: t => { if (t === 'ship f5p1 specialist-batched') clone(path.join(dir, '.state/BEAM')); return 'NO FINDINGS'; } });
+    expect(await runPass(h, base)).toContain('FETCH_RERUN_BLOCKED: stage=specialists attempt=2');
+    const before = h.creates.length;
+    const models = { 'outside-voice': { model_id: 'openai/gpt-6.1-sol' }, 'adversarial-native': { model_id: 'anthropic/claude-opus-5-5', reasoning_mode: 'high' } };
+    const res = await runPass(h, { ...base, stage: 'voices', models });
+    expect(res).toContain("FETCH_RERUN_BLOCKED: stage=specialists attempt=2 path='" + fs.realpathSync(path.join(dir, '.state/BEAM')) + "'");
+    expect(res).toMatch(/STOP: gstack-review-dispatch sweep --stage voices --phase start exited 3/);
+    expect(h.creates.length).toBe(before);
+  }, 240_000);
+// Value: protects=a remote URL git writes quoted (one holding '#') with credentials never reaches the printed FETCH_VIOLATION, the start inventory, the manifest or the ledger, while a remote without userinfo prints exactly as configured;
+  //   fails_when=the sweep scans raw config text, so the quoted value skips the userinfo strip and FAKETOKEN is printed and recorded; why_new=ship-c-v2 outside-voice#1 (High, lib/review-sweep.ts:45; GSTA-297 on #4011);
+  //   seam=lib/review-sweep.ts remotes (git config --null); no_claim=that other tools print remotes safely
+  test('a quoted remote URL with userinfo prints and records without it; a remote without userinfo prints unchanged', async () => {
+    const { dir, env } = repo();
+    made.push(dir);
+    const out = path.join(dir, '.state/run/p1');
+    const FAKE = 'FAKETOKEN';
+    const OLD = 'FAKETOKEN-old';
+    const at = (p: string, url: string) => { fs.mkdirSync(p, { recursive: true }); expect(spawnSync('bash', ['-c', 'git init -q && git remote add origin "$1"', '_', url], { cwd: p, encoding: 'utf8', timeout: 30_000 }).status).toBe(0); };
+    at(path.join(dir, '.state/OLD'), `https://ci-bot:${OLD}@github.com/me/old.git#main`);
+    expect(fs.readFileSync(path.join(dir, '.state/OLD/.git/config'), 'utf8')).toContain(`url = "https://ci-bot:${OLD}@github.com/me/old.git#main"`);
+    const h = host(dir, env, { output: t => { if (t === 'ship f6p1 specialist-batched') { at(path.join(dir, '.state/BEAM'), `https://bot:${FAKE}@github.com/sealed-org/BEAM.git#x`); at(path.join(dir, '.state/PLAIN'), 'https://github.com/sealed-org/PLAIN.git#x'); } return 'NO FINDINGS'; } });
+    const res = await runPass(h, { base: 'main', out, pass: 'f6p1', planFlags: ['--depth-floor', 'full'] });
+    expect(res).toMatch(/^FETCH_VIOLATION: stage=specialists attempt=1 kind=repo path='[^']*\/BEAM' remote=https:\/\/github\.com\/sealed-org\/BEAM\.git#x bytes=/m);
+    expect(res).toMatch(/^FETCH_VIOLATION: stage=specialists attempt=1 kind=repo path='[^']*\/PLAIN' remote=https:\/\/github\.com\/sealed-org\/PLAIN\.git#x bytes=/m);
+    const m = JSON.parse(fs.readFileSync(path.join(out, 'pass-manifest.json'), 'utf8')) as Manifest;
+    const inventories = fs.readdirSync(path.join(out, 'sweep')).map(f => fs.readFileSync(path.join(out, 'sweep', f), 'utf8'));
+    expect(inventories.join('')).toContain('https://github.com/me/old.git#main');
+    const v = bin(dir, env, ['verify', '--ledger', m.ledger]);
+    for (const text of [res, v.stdout, ...inventories, fs.readFileSync(m.ledger, 'utf8'), fs.readFileSync(path.join(out, 'pass-manifest.json'), 'utf8')]) expect(text).not.toMatch(/FAKETOKEN|ci-bot|bot:/);
   }, 240_000);
 });
 const briefDirOf = (h: ReturnType<typeof host>, title: string) => briefDir(h.creates.find(c => c.title === title)?.prompt ?? '');

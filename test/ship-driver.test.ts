@@ -177,11 +177,11 @@ describe('variant G: the call plan, observe budget, waits and audit readers (GST
     expect(doc).toContain('gstack-ship-budget close --reading R --credits C');
   });
 
-  // Value: protects=no call waits past the 5-minute prompt cache and no turn ends while readers run: a program returns 200 s after its first line, the next call resumes the poll, long commands run in background, and Capy waits on operations only when no reader runs, with the choice of a ping over a waiting child stated where the parent and Capy read it; fails_when=a phase waits in one program until slow work ends (cache probe: a call after a 7-minute gap cost ~2,820 credits against ~70), the parent ends its turn on `wait` while readers run (GSTA-189: 23 of 25 waits were one wake per finished reader), the cadence drifts back toward the cache lifetime (240 s counted from the poll loop, or 270 s), or the reason is dropped;
+  // Value: protects=no call waits past the 5-minute prompt cache and no turn ends while readers run: a program returns 200 s after its first line, the next call resumes the poll, long commands run in background, and Capy waits on operations only when no reader runs, with the choice of a ping over a waiting child stated where the parent and Capy read it; fails_when=a phase waits in one program until slow work ends (cache probe: a call after a 7-minute gap cost ~2,820 credits against ~70), the parent ends its turn on `wait` while readers run (GSTA-189: 23 of 25 waits were one wake per finished reader), the cadence drifts back toward the cache lifetime (240 s counted from the poll loop, or 270 s), or the reason is dropped, or a lane is no longer told to rerun the same command after a machine restart (GST-1028: lanes destroyed pregate VMs a rerun would have reattached);
   //   why_new=GSTA-167 calls plan C1; seam=none; no_claim=the host's cache lifetime or wake policy
   test('waits return 200 s after a program starts and never end the turn while readers run, in the driver and the Capy skill', () => {
     const waits = flat(doc.slice(doc.indexOf('**Waits.**'), doc.indexOf('\n\n', doc.indexOf('**Waits.**'))));
-    for (const s of ['No call waits past 200 s', '200 s after its first line', 'the next call resumes the poll', 'run in background', 'Never end the turn while readers run',
+    for (const s of ['No call waits past 200 s', '200 s after its first line', 'the next call resumes the poll', 'run in background', 'after a restart, rerun the same command', 'Never end the turn while readers run',
       'A small waiting child saves nothing', 'Past 100 minutes']) expect(waits).toContain(s);
     const capy = flat(read('capy/skill/gstack/SKILL.md'));
     for (const s of ['never let 5 minutes pass between calls', 'While readers run, never end the turn on `wait`', '`duration_seconds: 200`', 'one `tools.subagent.list` per ~20 s tick',
@@ -258,6 +258,14 @@ describe('variant G: the call plan, observe budget, waits and audit readers (GST
       '(4) `sent` (`BRIEF_MISMATCH` voids it), then one subagent per reader on its rendered file', 'final output and status, via `collect`', '`JUDGMENT: ok` before any fix',
       '`gstack-review-dispatch verify` (`VERIFY: clean`)']) expect(f).toContain(s);
     expect(f.indexOf('gstack-review-dispatch verify')).toBeLessThan(f.indexOf('`gstack-review-read`'));
+  });
+});
+
+describe('review bots (#3122)', () => {
+  test('only Step 6.5 waits on Greptile detection; Step 10 routes to the bot triage section for any configured bot', () => {
+    expect(doc).toContain('Step 6.5 runs only if `gstack-greptile-early detect` finds');
+    expect(doc).not.toContain('Steps 6.5 and 10 run only if');
+    expect(doc).toContain('- Step 10 with a PR: `sections/greptile.md#step-10-address-review-bot-comments-if-pr-exists`');
   });
 });
 

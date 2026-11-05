@@ -125,9 +125,9 @@ unavailable results as passing.>
 ## Eval Results
 <If evals ran: suite names, pass/fail counts, cost dashboard summary. If skipped: "No prompt-related files changed — evals skipped.">
 
-## Greptile Review
-<Step 10 complete: list comments with [FIXED] / [FALSE POSITIVE] / [ALREADY FIXED], or "No Greptile comments." for a successful empty fetch.>
-<Step 10 unavailable: include `Greptile triage: UNAVAILABLE (dispatch failed)` and the actual reason.>
+## Review bot comments
+<Step 10 complete: list comments with their bot and [FIXED] / [FALSE POSITIVE] / [ALREADY FIXED], or "No review bot comments." for a successful empty fetch.>
+<Step 10 unavailable: include `Review bot triage: UNAVAILABLE (dispatch failed)` and the actual reason.>
 <Step 10 no_pr: omit this section.>
 
 ## Scope Drift
@@ -180,8 +180,8 @@ the receipt write below refuses (`DOCS_AUDIT_BLOCKED`) when the body lacks it.>
 
 The PR body is world-readable on a public repo. `gstack-post` scans the exact title
 and body bytes it sends and passes them to `gh`/`glab` as arguments, so there is no
-separate scan here. Wrap any Codex / Greptile / eval output sections in
-tool-attributed fences (` ```codex-review ` / ` ```greptile `) so the scanner
+separate scan here. Wrap any Codex / review bot / eval output sections in
+tool-attributed fences (` ```codex-review ` / ` ```review-bot `) so the scanner
 WARN-degrades the example credentials those tools quote instead of blocking the PR
 (a live-format credential inside the fence still blocks).
 
@@ -220,8 +220,9 @@ per-lane counts (`{"<lane>":{"pass":N,"fail":N,"skip":N}}`) to
 
 ```bash
 rm -f .gstack/tmp/review-loop.json
+NS=$(~/.claude/skills/gstack/bin/gstack-no-stop list | sed -n 's/^NO_STOP_FILE: //p'); [ -s "$NS" ] || NS=
 ~/.claude/skills/gstack/bin/gstack-review-scope summary --since "$REVIEW_SINCE" --no-ledger --out .gstack/tmp/review-loop.json &&
-~/.claude/skills/gstack/bin/gstack-ship-receipt write --pr <pr-number> --base <base> --gate @.gstack/tmp/ship-gate.json --pregate .gstack/tmp/pregate.json --issues @.gstack/tmp/issues.json --review-loop @.gstack/tmp/review-loop.json --docs @.gstack/tmp/docs-audit.json --body "$PR_BODY_FILE"
+~/.claude/skills/gstack/bin/gstack-ship-receipt write --pr <pr-number> --base <base> --gate @.gstack/tmp/ship-gate.json --pregate .gstack/tmp/pregate.json --issues @.gstack/tmp/issues.json --review-loop @.gstack/tmp/review-loop.json --docs @.gstack/tmp/docs-audit.json $([ -s .gstack/tmp/targeted.json ] && echo --review-targeted @.gstack/tmp/targeted.json) ${NS:+--no-stop "@$NS"} --body "$PR_BODY_FILE"
 ```
 
 A Step 5 red-base pause adds `--base-red <pause file>` (a conditional receipt the queue
@@ -231,6 +232,10 @@ or a body missing the exception line, is `DOCS_AUDIT_BLOCKED` with nothing writt
 When the owner accepted a stop after a fix-check edit, add
 `--review-loop-exception @<file>` (`{accepted_by, date, via, reason, fix_check: {head, findings}}`)
 and put its printed `Review-loop exception:` line in the body; never a prose line under `REVIEW_LOOP:`.
+When `gstack-review-dispatch verify` printed `REVIEW_EXCLUDE_RECORD: digest=<d>`, add `--review-exclude <d>`
+and Step 14.5's `--docs-post <audit-id>-post.json` and `--docs-pre <its Prepare snapshot>`; a digest that no longer matches HEAD is
+`RECEIPT_INVALID field=review_exclude`: rerun the review, not the write, unless only the docs audit's
+files under `review_exclude_paths` changed it, which `--docs-post` binds (`REVIEW_EXCLUDE_DOCS_AUDIT:`).
 
 The summary reads this branch's review log for the invocation's passes (its
 `REVIEW_LOOP:` line is the one the Pre-Landing Review section carries). Here every
@@ -274,7 +279,7 @@ reads the title back. Then resolve the draft state from Step 9's gate findings:
    under Step 17's recorded human authorisation (option B there); the body already
    carries the `Gate edits: N open` banner. Without that record, STOP here and report.
 
-Print the existing URL and continue to Step 20; do not run the create command below.
+Print the existing URL and continue to Step 20; skip the create command below.
 
 **No open PR/MR:** add `--draft` when any gate finding is `open` (a later agent never
 infers approval from the PR existing; the human marks it ready after dispositioning
@@ -295,17 +300,17 @@ Branch on the exit code of either block:
   finding (sterner on public repos, no batch acknowledge). PII offers auto-redact:
   write `~/.claude/skills/gstack/bin/gstack-redact --from-file "$PR_BODY_FILE" --auto-redact <ids>`
   output back into the body file and rerun the block, which scans again. Only when the
-  user accepts the findings as they are, rerun the same block with
+  user accepts the findings unchanged, rerun the same block with
   `--confirm <confirm-token>` added to the command that printed it; any edit needs a new token.
 - **64** with stderr saying the current body holds a title `more than once`: nothing was
   posted. STOP and report the duplicated titles; never rerun with `--replace` yourself,
   since a human picks which copy stays (docs/troubleshooting.md#gstack-post-pr-body-merge).
-- **3** `gh`/`glab` failed, or any other **64** (no usable remote or CLI): print the error, the
-  branch name, the remote URL and the block for posting by hand. Do not stop — the code
-  is pushed — but never report a PR that was not created. With open gate findings,
+- **3** `gh`/`glab` failed, or any other **64** (no usable remote or CLI): print the error, branch,
+  remote URL and the block to post by hand. Do not stop — the code is pushed — but never
+  report a PR that was not created; Step 22 ends `status=refused`. With open gate findings,
   also say the gate edits were not disclosed and leave the Step 16 open-items report
   in the invocation record; never report the disclosure as done.
-- Any other exit is an error that blocks publication until its cause is fixed.
+- Any other exit errors: it blocks publication until its cause is fixed.
 
 **Output the PR/MR URL** — then proceed to Step 20.
 

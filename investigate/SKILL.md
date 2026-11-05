@@ -2,7 +2,7 @@
 name: investigate
 preamble-tier: 2
 version: 1.0.0
-description: Systematic debugging with root cause investigation. (gstack)
+description: "Use when a test fails, code errors or output is wrong: find the root cause, then fix it. (gstack)"
 allowed-tools:
   - Bash
   - Read
@@ -15,9 +15,29 @@ allowed-tools:
 triggers:
   - debug this
   - fix this bug
+  - test fails
+  - failing test
   - why is this broken
-  - root cause analysis
+  - this doesn't work
+  - build is broken
+  - stack trace
   - investigate this error
+  - root cause analysis
+contract:
+  version: 1
+  items:
+    - id: debug-report
+      kind: report_labels
+      heading: DEBUG REPORT
+      labels:
+        - Symptom
+        - Root cause
+        - Fix
+        - Evidence
+        - Regression test
+        - Status
+    - id: check-after-last-edit
+      kind: check_after_last_edit
 hooks:
   PreToolUse:
     - matcher: "Edit"
@@ -61,6 +81,15 @@ gbrain:
 <!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->
 <!-- Regenerate: bun run gen:skill-docs -->
 
+## Done means
+
+Finish only when each of these exists (contract v1):
+
+- `debug-report`: a `DEBUG REPORT` with Symptom, Root cause, Fix, Evidence, Regression test and Status filled in (`none: <why>` where the skill's own stop rule leaves one empty).
+- `check-after-last-edit`: a test or repro command run after your last edit.
+
+`~/.claude/skills/gstack/bin/gstack-skill-contract check` reads them from the transcript (docs/skill-routing-and-contracts.md). For an item that truly does not apply, run `~/.claude/skills/gstack/bin/gstack-skill-contract waive <item> --reason "<why>"` (this session only; it counts as a miss).
+
 ## Shared preamble (load first)
 
 This skill follows gstack shared preamble `4e82fa4c839f` (AskUserQuestion format, voice, writing, completeness and completion rules). If your Read of that file, headed by this id, is still in context, do not read it again; otherwise Read `~/.claude/skills/gstack/investigate/sections/preamble.md` in full before the command below. A section or subsection here with a shared heading replaces the shared one.
@@ -96,9 +125,9 @@ If `SKILL_PREFIX` is `true` use `/gstack-*` names; paths stay `~/.claude/skills/
 
 ## Question Tuning (skip entirely if `QUESTION_TUNING: false`)
 
-Before each decision brief (AskUserQuestion or Conductor/fallback prose), choose `question_id` from `~/.claude/skills/gstack/scripts/question-registry.ts` or `{skill}-{slug}`, then run `~/.claude/skills/gstack/bin/gstack-question-preference --check "<id>"`; for an unregistered id, write the question summary to `.gstack/tmp/qt.txt` (file-write tool) and append `--summary-file .gstack/tmp/qt.txt` (one-way keyword check). `AUTO_DECIDE` means choose the recommended option and say "Auto-decided [summary] → [option] (your preference). Change with /plan-tune." `ASK_NORMALLY` means ask.
+Before each decision brief (AskUserQuestion or Conductor/fallback prose), choose `question_id` from `~/.claude/skills/gstack/scripts/question-registry.ts` or `{skill}-{slug}`, then run `~/.claude/skills/gstack/bin/gstack-question-preference --check "<id>"`; for an unregistered id, write the question summary to `.gstack/tmp/qt.txt` (file-write tool) and append `--summary-file .gstack/tmp/qt.txt` (one-way keyword check); its `--signal-keys` prints an optional signal-key hint. `AUTO_DECIDE` means choose the recommended option and say "Auto-decided [summary] → [option] (your preference). Change with /plan-tune." `ASK_NORMALLY` means ask.
 
-**Embed the question_id as a marker in every asked brief**, ad hoc IDs included, with one ID for check, marker and log. Include `<gstack-qid:{question_id}>` once in the question text itself, not only a command or log. On prose paths, use the explicit reply line. Without the marker, the PreToolUse hook treats AskUserQuestion as observed-only and never auto-decides.
+**Embed the question_id as a marker in every asked brief**, ad hoc IDs included, with one ID for check, marker and log. Include `<gstack-qid:{question_id}>` once in the question text itself, not only a command or log. On prose paths, use the explicit reply line. Without the marker the hook never auto-decides.
 
 **Embed the option recommendation via the `(recommended)` label suffix** on exactly one option per AUQ. The PreToolUse hook parses it first, falls back to "Recommendation: X" prose, and refuses when ambiguous (two labels = refuse).
 

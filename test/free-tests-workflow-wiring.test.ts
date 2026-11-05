@@ -5,9 +5,11 @@
  *   1. It invokes the CANONICAL runner (bun run test:free), not a raw
  *      `bun test <dirs>` glob — the runner owns TEST_ROOTS and strict-output
  *      classification, so a truncated run can't report green.
- *   2. It is SECRETLESS: free tests make no API calls, and keeping keys out
- *      means fork PRs get real signal here. Any `secrets.` reference is a
- *      regression.
+ *   2. It is SECRETLESS where code runs: free tests make no API calls, and
+ *      keeping keys out means fork PRs get real signal here. The one allowed
+ *      `secrets.` reference is TRUNK_API_TOKEN in the learning-only
+ *      trunk-dynamic-ci observer, which checks out and runs nothing of the PR's
+ *      and which no job depends on; any other reference is a regression.
  *   3. It triggers on `pull_request` (never `pull_request_target`, which
  *      would hand a fork PR the base repo's context).
  *
@@ -19,6 +21,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { spawnSync } from 'node:child_process';
+import {
+  DEFAULT_WALL_TIMEOUT_MS, FLAKY_RETRY_CAP, ciPlanMatrix, collectFreeTestFiles, createFreeCiPlan,
+  loadFreeTestDurations, wallTimeoutForPackedShard, wallTimeoutForShard,
+} from '../scripts/test-free-shards';
 
 const WORKFLOW = path.resolve(import.meta.dir, '..', '.github', 'workflows', 'free-tests.yml');
 
@@ -31,9 +37,37 @@ describe('free-tests workflow wiring', () => {
   });
 
   test('secretless: no secrets reach the free lane', () => {
-    expect(source).not.toContain('secrets.');
+    const jobs = (Bun.YAML.parse(source) as any).jobs;
+    expect(source.match(/secrets\s*(?:\.|\[)\s*['"]?[A-Za-z0-9_-]*|toJSON\(\s*secrets\b/gi)).toEqual(['secrets.TRUNK_API_TOKEN']);
+    expect(jobs['trunk-dynamic-ci'].env).toEqual({ TRUNK_API_TOKEN: '${{ secrets.TRUNK_API_TOKEN }}' });
     expect(source).not.toContain('ANTHROPIC_API_KEY');
     expect(source).not.toContain('OPENAI_API_KEY');
+  });
+
+  // Value: protects=GST-1400's learning-only contract: Trunk Dynamic CI observes free-suite and macos-named-regressions on same-repository pull requests and can never skip, gate or fail anything; fails_when=a job needs or reads the observer, it re-exports outputs, checks out or runs PR code beside the token, gains token scopes, loses its fail-open settings, runs on forks or non-PR events, or the action is unpinned; seam=.github/workflows/free-tests.yml; no_claim=what Trunk recommends
+  test('trunk-dynamic-ci is a learning-only observer: pinned, scope-less, fail-open, read by no job', () => {
+    const jobs = (Bun.YAML.parse(source) as any).jobs;
+    const trunk = jobs['trunk-dynamic-ci'];
+    expect(trunk.if).toBe("github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository");
+    expect(trunk.permissions).toEqual({});
+    expect(trunk['continue-on-error']).toBe(true);
+    expect(trunk['timeout-minutes']).toBe(5);
+    expect(trunk.outputs).toBeUndefined();
+    expect(trunk.needs).toBeUndefined();
+    expect(trunk.steps).toHaveLength(1);
+    const [step] = trunk.steps;
+    expect(step.uses).toBe('trunk-io/dynamic-ci@5bcddbf3615c2b032c21eed1b514c91164bda4a8');
+    expect(step.run).toBeUndefined();
+    expect(step.if).toBe("env.TRUNK_API_TOKEN != ''");
+    expect(step['continue-on-error']).toBe(true);
+    expect(step['timeout-minutes']).toBe(3);
+    expect(step.env).toEqual({ TRUNK_DISABLE_TELEMETRY: 'true' });
+    expect(step.with).toEqual({ token: '${{ env.TRUNK_API_TOKEN }}', 'job-keys': 'free-suite,macos-named-regressions', 'github-token': '', 'enable-annotation': 'true' });
+    for (const key of step.with['job-keys'].split(',')) expect(jobs[key], key).toBeDefined();
+    for (const name of Object.keys(jobs).filter(n => n !== 'trunk-dynamic-ci')) {
+      expect([name, [jobs[name].needs ?? []].flat()]).not.toEqual([name, expect.arrayContaining(['trunk-dynamic-ci'])]);
+      expect([name, JSON.stringify(jobs[name])]).not.toEqual([name, expect.stringMatching(/trunk|dynamic-ci/i)]);
+    }
   });
 
   test('pull_request trigger, never pull_request_target', () => {
@@ -234,5 +268,31 @@ describe('free-tests workflow wiring', () => {
     // by checkout would hand that code whatever the repo default allows.
     expect(source).toMatch(/permissions:\s*\n\s*contents:\s*read/);
     expect(source).toMatch(/persist-credentials:\s*false/);
+  });
+  test('every free-suite job timeout covers its shard\'s runner wall, flaky retry and setup (#3850)', () => {
+    // GitHub must never kill a free-suite job before the runner's own wall can
+    // name the hung file and its flaky-retry pass can run: that kill uploads no
+    // result and leaves red CI with no attribution. The job timeout therefore
+    // follows the real plan for the committed duration seed and the live
+    // FREE_SUITE_SHARDS / FREE_SUITE_JOBS, never a hand-picked number.
+    const workflow = Bun.YAML.parse(source) as any;
+    const setupSeconds = Number(workflow.env.FREE_SUITE_SETUP_SECONDS);
+    expect(Number.isInteger(setupSeconds) && setupSeconds > 0).toBe(true);
+    const plan = createFreeCiPlan(collectFreeTestFiles(), Number(workflow.env.FREE_SUITE_SHARDS),
+      loadFreeTestDurations() ?? {}, 'wiring', Number(workflow.env.FREE_SUITE_JOBS));
+    const declared = workflow.jobs['free-suite']['timeout-minutes'];
+    const emitted = ciPlanMatrix(plan, setupSeconds);
+    if (!('include' in emitted)) throw new Error('the CI matrix carries no per-shard timeouts');
+    const short = plan.shards.flatMap(shard => {
+      const neededMs = wallTimeoutForPackedShard(shard.predictedMs, DEFAULT_WALL_TIMEOUT_MS, shard.files.length)
+        + wallTimeoutForShard(FLAKY_RETRY_CAP) + setupSeconds * 1000;
+      const minutes = declared === '${{ matrix.timeout_minutes }}'
+        ? emitted.include.find(entry => entry.shard === shard.shard)?.timeout_minutes ?? 0
+        : Number(declared);
+      return minutes * 60_000 >= neededMs ? [] : [`shard ${shard.shard}: ${minutes} min < ${Math.ceil(neededMs / 1000)} s`];
+    });
+    expect(short).toEqual([]);
+    const planStep = workflow.jobs['free-plan'].steps.find((step: any) => step.id === 'plan');
+    expect(planStep.run).toContain('--job-setup-seconds "$FREE_SUITE_SETUP_SECONDS"');
   });
 });

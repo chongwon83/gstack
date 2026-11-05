@@ -247,6 +247,63 @@ describe('release-cut: planning', () => {
     expect(thawed.ok, JSON.stringify(thawed)).toBe(true);
     if (thawed.ok) expect(thawed.plan.via).toBe('train ok1');
   });
+
+  test('GST-1133: a backstop freeze left from before release_gate stands until a GREEN release gate on a commit that contains its main; a train freeze ignores the gate', () => {
+    const f = fixture();
+    const add = (record: unknown, on: string) => { git(f.seed, 'notes', '--ref=' + NOTES_REF, 'add', '-f', '-m', JSON.stringify(record), on); git(f.seed, 'push', '-q', '-f', 'origin', NOTES_REF); };
+    const freeze = { schema: 1, kind: 'freeze', train: 'backstop', reason: 'backstop red', main: { sha: f.shas['1.0.1'] }, cleared_at: null };
+    add(freeze, f.shas['1.0.1']!);
+    add({ schema: 1, kind: 'release', sha: f.shas['1.0.0'], verdict: 'GREEN', run: { id: 1 } }, f.shas['1.0.0']!);
+    expect(readTrainNotes(f.git).freeze).toBe('queue frozen since train backstop: backstop red');
+    add({ schema: 1, kind: 'release', sha: f.shas['1.0.2'], verdict: 'GREEN', run: { id: 2 } }, f.shas['1.0.2']!);
+    expect(readTrainNotes(f.git).freeze).toBeNull();
+    add({ ...freeze, train: 'ok1' }, f.shas['1.0.1']!);
+    expect(readTrainNotes(f.git).freeze).toBe('queue frozen since train ok1: backstop red');
+  });
+});
+
+describe('release-cut: the release gate holds and gates (lib/release-gate.ts records)', () => {
+  const release = (sha: string, verdict: string, run: number) => ({ schema: 1, kind: 'release', repo_key: 'k', sha, verdict, run: { id: run, url: 'u' }, red_cases: verdict === 'RED' ? ['case-a'] : [], created_at: 'x', updated_at: 'x' });
+  const note = (f: ReturnType<typeof fixture>, record: unknown, on: string) => {
+    git(f.seed, 'notes', '--ref=' + NOTES_REF, 'add', '-f', '-m', JSON.stringify(record), on);
+    git(f.seed, 'push', '-q', '-f', 'origin', NOTES_REF);
+  };
+
+  // Value: protects=a red release record is the freeze: every cut is refused while no green gate sits on a later commit that contains the red one,
+  // even when every check run is green, and an incomplete gate or a green gate on an older commit does not lift it; fails_when=release-cut releases a
+  // commit while the newest release gate is red, a green record anywhere clears the hold, or an INCOMPLETE gate clears it; why_new=the freeze tests know
+  // only the train freeze record; seam=none; no_claim=real refs/notes/gstack-trains content (fixture records shaped like ReleaseRecord)
+  test('a red release record refuses the cut; only a green gate on a later commit lifts it', () => {
+    const f = fixture();
+    note(f, release(f.shas['1.0.2']!, 'RED', 41), f.shas['1.0.2']!);
+    note(f, release(f.shas['1.0.1']!, 'GREEN', 40), f.shas['1.0.1']!);
+    const held = planRelease({ repo: f.repo, git: f.git, gh: f.gh });
+    expect(held.ok).toBe(false);
+    if (!held.ok) { expect(held.code).toBe('REFUSED'); expect(held.message).toContain('release gate red on ' + f.shas['1.0.2']!.slice(0, 12)); }
+    note(f, release(f.shas['1.0.3']!, 'INCOMPLETE', 42), f.shas['1.0.3']!);
+    expect(planRelease({ repo: f.repo, git: f.git, gh: f.gh }).ok).toBe(false);
+    note(f, release(f.shas['1.0.3']!, 'GREEN', 43), f.shas['1.0.3']!);
+    const lifted = planRelease({ repo: f.repo, git: f.git, gh: f.gh });
+    expect(lifted.ok, JSON.stringify(lifted)).toBe(true);
+    if (lifted.ok) expect(lifted.plan.sha).toBe(f.shas['1.0.3']);
+  });
+
+  // Value: protects=a green release record gates its commit when the main-backstop check run is absent or neutral (the check publish failed or was
+  // superseded), and the CANDIDATE line names the gate run; a red check run still keeps the commit out; fails_when=a commit the release gate passed is
+  // never released without the check, or release evidence overrides a red check run; why_new=train records were the only notes evidence; seam=none;
+  // no_claim=a live gate run
+  test('a green release record gates a commit whose main-backstop check never ran; a red check run still wins', () => {
+    const f = fixture();
+    const head = f.shas['1.0.3']!;
+    f.state.checks[head] = GREEN.filter(c => c.name !== BACKSTOP_CHECK);
+    note(f, release(head, 'GREEN', 77), head);
+    const gated = planRelease({ repo: f.repo, git: f.git, gh: f.gh });
+    expect(gated.ok, JSON.stringify(gated)).toBe(true);
+    if (gated.ok) { expect(gated.plan.sha).toBe(head); expect(gated.plan.via).toBe('release gate run 77'); }
+    f.state.checks[head] = [...GREEN.filter(c => c.name !== BACKSTOP_CHECK), { name: 'quality', status: 'completed', conclusion: 'failure' }];
+    const red = planRelease({ repo: f.repo, git: f.git, gh: f.gh });
+    if (red.ok) expect(red.plan.sha).not.toBe(head);
+  });
 });
 
 describe('release-cut: train evidence gates a commit whose backstop never settled', () => {

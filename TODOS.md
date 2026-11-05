@@ -2,6 +2,16 @@
 
 ## NEXT PRIORITY
 
+### P3: clarity-judge removal follow-ups (filed 2026-11-04, GST-1371)
+
+- **Delete the four orphaned judge-calibration corpora.** `test/fixtures/judge-calibration/{qa-workflow,qa-health-rubric,workflow-default,cookie-workflow}/` serve no configuration since the skill-prose clarity judges were removed; deleting them in the removal PR put its diff over the /ship review ceiling. Delete them alone once main is unfrozen (or after `review_exclude_paths` lands), and drop their rows from the README's results tables if the record is no longer wanted. **Effort:** S. **Priority:** P3.
+- **Refresh the judge counts the removal left stale.** `docs/TESTING_INTERNALS.md`'s all-green probability table counts 24 PR-gate judges and `scripts/gate-cost-replay.ts`'s header says complete full-gate runs hold 24; there are none now (GST-1403 removed the last three). Recompute the table from current rates rather than editing the count alone. **Effort:** S. **Priority:** P3.
+- **Retire the empty standalone-judge lane (GST-1403).** `LLM_JUDGE_TOUCHFILES` is empty and `test/skill-llm-eval.test.ts` is gone, but the paid planner, report, rerun, train gate, ship-measure and gate-cost code still carry a judge branch keyed on that file (`JUDGE_FILE`, `selection.judges`, `--skip-judges` in `evals-periodic.yml`, `afterRepairCommand`'s judge form). Remove the branch and the `selection.judges` manifest field together, keeping old manifests parseable, or keep the lane documented as the home for a future standalone judge. **Effort:** M. **Priority:** P3.
+
+### P3: screen verdict reuse lookback (filed 2026-11-02, GST-1027)
+
+- **Screen reuse sees only the newest 50 evals.yml dispatches.** `listGateRuns` (`scripts/recover-receipts.ts`) lists dispatched screens as one unfiltered page (`event=workflow_dispatch`, `per_page=50`), shared with every PR's screens and every train. At week-B traffic (220 dispatches from 2026-10-25 to 11-02, about 27 a day) that is under two days, and nothing says when a PR's earlier screen fell off the page: `gate-reuse find` prints "no earlier executed gate on this PR bound a verdict" and the full screen runs. No miss yet: the longest gap among the week-B re-screens was 44 dispatches (#3607). Page the listing until runs are older than the PR's oldest candidate head (or filter by `created>=`), and print a truncation line when the last page is full. A missed run only costs a screen, never a wrong verdict. **Effort:** S. **Priority:** P3.
+
 ### P3: gstack-clean follow-ups (filed 2026-10-31, GSTA-226 E2, #2627)
 
 - **Codex templates delete their own scratch.** The `/codex` review, challenge and consult blocks leave `codex-err-*`, `codex-resp-*`, `codex-out-*` and `codex-prompt-*` mktemp files under `TMP_ROOT` (which falls back to `.gstack/tmp`) and the `codex-prompt.*` and `codex-focus.*` free-text files in `.gstack/tmp`; `gstack-clean` removes them after 7 days. Delete each file at the end of its block instead. Skill prose for every user, so it needs its own review. **Effort:** S. **Priority:** P3.
@@ -52,8 +62,6 @@ The 158 older open issues were re-checked against main 5cb5e1c (v1.91.83.0). Of 
   - #1048: "smallest clear diff" in `plan-eng-review/SKILL.md.tmpl` and `plan-ceo-review/SKILL.md.tmpl` has no schema-design carve-out, so it biases reviews toward JSON blobs. Add one tradeoff bullet, with a paid before/after case. **Effort:** S. **Priority:** P3.
   - #1791: every plan-eng-review run writes a fresh `tasks-eng-review-<ts>.jsonl` with no branch in the name and no reconciliation (`scripts/resolvers/tasks-section.ts`). Put the branch in the name and supersede earlier sets. **Effort:** M. **Priority:** P3.
   - #1957: /autoplan Phase 0 prints no matched-terms line for UI scope and keeps UI and DX terms in two places (`bin/gstack-autoplan-snapshot.ts`, `lib/autoplan-prompts.ts`). One shared terms module, and a `borderline` flag in the printed line. **Effort:** M. **Priority:** P3.
-- **Review**
-  - #356: `/review` has no repo-convention check, so a `.bat` added to a bash-and-Make repo passes. Add it to `review/specialists/maintainability.md`. **Effort:** S. **Priority:** P3.
 - **Office hours and design**
   - #340: the approved sketch stays in a purgeable `mktemp` dir and no downstream design skill reads it (`scripts/resolvers/design.ts`). Copy it next to the design doc and have plan-design-review and design-review read it. **Effort:** S. **Priority:** P3.
 - **Questions**
@@ -85,7 +93,7 @@ The 158 older open issues were re-checked against main 5cb5e1c (v1.91.83.0). Of 
 Each item was decided in the Wave 9 plan and parked with its reason. Credit the reporter or contributor when it is picked up.
 
 - **Fold `triggers:` into skill descriptions (#2118)** — `scripts/gen-skill-docs.ts` folds only `voice-triggers:`, and the trimmed description keeps one sentence, so natural-language triggers never reach the listing. Parked because it conflicts with the catalog-trim design and would regenerate every skill. Mechanism when picked up: a `when_to_use:` frontmatter key for the Claude host, built from `triggers:`, deduped, and kept inside the catalog byte budget (Claude Code's 1,536-character combined listing limit); hosts that allowlist name and description get a bounded "Use when…" sentence or nothing. **Effort:** M. **Priority:** P2.
-- **Plan-tune `{skill}-{slug}` ids never reach a signal (#3442, split from #2623)** — the label-to-key capture (#3394), `contributing_events` and the per-day bound (#3397) closed the rest of #2623. Remaining: `scripts/resolvers/question-tuning.ts` lets skills use `{skill}-{slug}` ids, which have no registry entry and so no `signal_key`; those answers never move a dimension. Acceptance: `{skill}-{slug}` ids get a hinted fallback to a registered signal key. Needs a design call on the key source. Credit @v639dragoon. **Effort:** M. **Priority:** P2.
+- **Plan-tune qid marker follow-ups (#3442 review notes, filed 2026-11-02)**: `QID_MARKER_RE` in `scripts/qid-marker.ts` drops the whole marker when the `;signal=` tail is malformed (an underscore, a space, an empty key). Match the id first and drop only a bad hint. `question-preference-hook.ts` still looks up the raw marker id, while the log hook lowercases it. Use `parseQidMarker(...).id` in both hooks. Add hinted-marker cases to `test/question-preference-hook.test.ts`. **Effort:** S. **Priority:** P3.
 - **Stateless, instruction-only host mode (#3061, @m-check1B)** — hosted multi-tenant runtimes have no install, state root or helper binaries, but skill bodies still read and write `$GSTACK_STATE_ROOT`, call `bin/gstack-*` and log telemetry. Deferred to the new-hosts theme below. Requirements kept on record: tenant-owned state (a `capabilities.state: 'none'` host renders host-provided hooks instead of shell steps), named artifact hooks (`ARTIFACT_SAVE`/`ARTIFACT_FIND` per kind, `WEB_RESEARCH`, `SECRET_SCAN`, `USER_PREF`) mapped the way the gbrain resolvers already are, a generator check that fails a stateless render containing `~/.gstack`, `$GSTACK_`, `bin/gstack-*` or `--event-type`, and the `claude` host's output byte-identical. The contributor offered an office-hours overlay plus the generator check as a first PR. **Effort:** L. **Priority:** P3.
 - **Legacy unprefixed Cursor skill folders (#3084)** — 1.31 Cursor installs created `~/.cursor/skills/<skill>/SKILL.md` links; 1.91 links `gstack-*` folders and `_prune_stale_generated` in `setup` only looks at `gstack-*` names, so Cursor can load two skills with the same name. `setup` already removes old unprefixed Claude entries; Cursor needs the same owned-link cleanup (remove only links that point into a gstack checkout). Split from #3084's data-loss fix, which Wave 9 Lane A0 ships. **Effort:** S. **Priority:** P3.
 - **`/retro global` says what a "session" is (#1315, third problem)** — `bin/gstack-global-discover.ts` counts transcript files and rollouts, so cron- or agent-driven repos show hundreds of "sessions" with no interactive work. Annotate the retro output that sessions are tool invocations or files, not distinct human working sessions. Problems 1 and 2 are fixed (v1.91.66.0 and Wave 9 Lane F). **Effort:** S. **Priority:** P3.
@@ -93,10 +101,10 @@ Each item was decided in the Wave 9 plan and parked with its reason. Credit the 
 
 ### P3: feature themes from the Wave 9 triage (filed 2026-10-11)
 
-The 73 open feature requests (75 with #3061 and #3122, which the themes below also name), grouped by theme with counted demand (issues in the theme). Each issue stays open under the `parked` label with a link to its theme here (the rule is in docs/triage.md); the three largest cross-cutting themes (new hosts, provider pluralism, install footprint) also have tracking issues. Pick a theme up as a whole and credit every linked reporter.
+The 73 open feature requests (74 with #3061, which the themes below also name), grouped by theme with counted demand (issues in the theme). Each issue stays open under the `parked` label with a link to its theme here (the rule is in docs/triage.md); the three largest cross-cutting themes (new hosts, provider pluralism, install footprint) also have tracking issues. Pick a theme up as a whole and credit every linked reporter.
 
 - **New hosts (7 issues, plus #3061 above and 9 PRs parked on Oct 8)** — Kimi CLI (#1072), Gemini CLI (#1247), Pi Agent (#1288), Claude Desktop Cowork (#1345), Letta Code (#2117), team mode for non-Claude hosts (#890), `/retro global` repo attribution for Antigravity sessions (#1977: they are counted now, but the working directory sits in an undocumented blob). Kimi Code and OMP discovery (#2917) shipped with the scanner registry in `bin/gstack-global-discover.ts`. Waits for the host-config work; see "Parked contributor ideas (Oct 8 triage)" for the parked host PRs. **Priority:** P3.
-- **Provider pluralism (7 issues, plus #3122)** — Gemini CLI as an outside-voice backend (#619), more image providers in `design` beyond OpenAI and Gemini (Gemini shipped for #990), Codex-native `image_gen` in the `design` binary's own generate, evolve and prototype calls (#2174; design-shotgun itself already uses `$imagegen` on Codex since #2175), GPT-6 Sol/Luna tiers in Codex call routing (#2943), a `/grok` review port (#2947), Codex review token usage (#2948), Codex refresh-token recovery docs (#1542), and a configurable PR review bot instead of hard-coded Greptile in /review, /ship and /retro (#3122, folded here by decision D4). One provider seam serves all of them. **Priority:** P3.
+- **Provider pluralism (7 issues)** — Gemini CLI as an outside-voice backend (#619), more image providers in `design` beyond OpenAI and Gemini (Gemini shipped for #990), Codex-native `image_gen` in the `design` binary's own generate, evolve and prototype calls (#2174; design-shotgun itself already uses `$imagegen` on Codex since #2175), GPT-6 Sol/Luna tiers in Codex call routing (#2943), a `/grok` review port (#2947), Codex review token usage (#2948), and Codex refresh-token recovery docs (#1542). One provider seam serves all of them. **Priority:** P3.
 - **Install footprint and layout (7 issues)** — skills.sh distribution (#113), `~/.gstack` as the global install path (#753), a repo-local install that keeps state in the project (#1235), five compiled binaries each bundling Bun (#1245), Windows junctions instead of copies (#1877), the 1.1 GB `~/.claude/skills` footprint (#2199), and a skill-only mode (#2528). Decision D6: setup keeps the staged copy on Windows, because it works today and links change what every cleanup deletes; #1943 (@JonasFocus, junctions) and #2129 (@TTmo123, symlinks with the privilege check) are closed with credit and their designs stay here as the starting point. See also "install footprint follow-ups from the October fix wave". **Priority:** P3.
 - **New skills (12 issues)** — GUI kanban for plan reviews (#247), journey maps (#729), UI-doc review (#851), assumption verification `/avl` (#1058), `/a11y-check` (#1104), `/env-check` (#1106), native plan writing (#1170), `/plan-experiment` and `/review-experiment` (#1195), `/plan-status` (#1343), language-specific reviewers (#1753), `/benchmark-mobile` (#1754), session start/end skills (#2088). **Priority:** P3.
 - **Ship, review and safety (9 issues)** — `/review` shadowing the native command (#422), a silent-deploy-failures checklist section (#2089), Conductor TODO proposals and a /ship block on unresolved ones (#2090), a light-ship mode (#2188), auditing an issue before filing it (#2642), maintainer-gated CI versus failures in landing-report (#2766), Flutter pubspec versions with build metadata (#2833), a deterministic fact-consistency check for document skills (#2887), a dual-engine /careful guard (#2888). **Priority:** P3.
@@ -283,15 +291,6 @@ Deferred from the approved reliability follow-ups plan (docs/designs/RELIABILITY
   runs (none of 20 without pty-workspace-trust, not significant). Next step:
   move the git calls in shared fixture helpers to async spawn with a hard
   timeout, or take a Bun release that fixes #34069. **Effort:** M. **Priority:** P2.
-- **Judge rubric anchors (C1, needs Garry: EVAL_POLICY)** — the pre-registered
-  control panels (`docs/evals/judge-controls-2026-10.md`, 36 calls) showed
-  every workflow judge separates gross breakage, but the qa workflow judge
-  passed a /qa bundle with Phase 10 Report removed (no sample noticed) and the
-  review judge passed /review with Step 3 removed (two of three samples noticed
-  it and rated it minor); no positive sample scored 5 on any dimension.
-  Missing-step coverage now lives in `test/workflow-required-steps.test.ts`.
-  Proposal: anchor completeness/actionability 4 and 5 to named deliverables
-  and inputs, as a pre-registered EVAL_POLICY change. **Effort:** M. **Priority:** P2.
 - **auto-decide-preserved: the CEO handoff line no longer depends on the model**
   — periodic run 37272185151 went red because the model led its chat with a
   paraphrase; a reminder beside the line measured 1/10. The Oct 6 wave shows
@@ -627,16 +626,6 @@ Deferred from the approved severe fix wave (docs/designs/SEVERE_FIX_WAVE_2026_10
   `rule` but gates on one judge sample. Decide under EVAL_POLICY whether it is
   a `judge` case (3 samples, median) and supply pass-rate evidence before
   changing the kind. Effort S. **Priority:** P2.
-- **qa/SKILL.md workflow judge dips below its actionability floor** — census
-  37186854666 (b24b6d8) scored actionability 3.67 < 4 (clarity 3, completeness
-  4) on the same qa bundle bytes that passed in census 37182865432 (44ef18c);
-  nothing under qa/, qa-only/ or scripts/resolvers changed between them. Red in
-  2 of the 17 earlier censuses (36920606897, 36776104571). Judge kind, 3
-  samples, unchanged threshold. The qa-only workflow judge did the same in
-  census 37198445662 (fd6854b): 3.67/4.33/3.67, one 3/4/3 sample citing density,
-  on qa-only bytes unchanged since 44ef18c, where it passed in four censuses.
-  Find which bundle step the low samples call unactionable before rewording.
-  Effort S. **Priority:** P3.
 - **shared-libs-review-revalidation stalls mid-stream** — gate census 4 of
   37186854666: the `filtered` scenario's stream stopped after a thinking block
   at 07:51:21 and emitted nothing until the 657 s abort; the other three
@@ -778,11 +767,6 @@ Deferred from the approved severe fix wave (docs/designs/SEVERE_FIX_WAVE_2026_10
   by re-running `./setup` from it. Iterate the registry's render column
   instead. **Effort:** S. **Priority:** P3.
 
-- **Judge actionability sits exactly at the 4.0 gate** (P2, from the PR #3014 eval
-  census) — all 24 workflow judges score actionability at 4.0 in nearly every run, so one
-  low sample of three fails the case (qa-only 9/78, qa 6/78, plan-ceo modes 5/78, plan-eng
-  sections 4/78, review 4/70 over 09-27..10-02). The repair is clearer skill text per case
-  (as done for qa in v1.91.14.0), not a lower threshold. Effort M.
 - **`--case` cannot select loop-registered paid cases** (P3) — coverage audits, TPA and
   plan-mode-no-op register their cases in a loop, so `test-paid-shards.ts --case <id>` runs
   nothing; teach `fileCaseRegistration` the loop pattern. Effort S.
@@ -807,25 +791,9 @@ Each item was deferred with a reason during the `/claude-api prompt-audit` clean
   other models with no runner, and the `.agents` render has no Codex runner for
   this eval. Narrow the rewording to the design-review render, or add per-host
   runners. Priority P2. Effort M.
-- **Judge prose and rubric cleanup (W2 deferral)** — the arm, qa health-rubric,
-  qa anti-refusal, cross-skill and voice judges, and the default workflow judge,
-  now send a JSON schema; their prompt-audit s11 M1-M7 prose cleanup is still
-  open, as is the qa anti-refusal rubric's "always … regardless" wording. Three
-  prose steps were triggered and not run: the qa workflow judge (its schema
-  comparison held: 4/24 new flips vs 2/24 old, one new false pass on a06, zero
-  format errors, so it stays on today's request), the default workflow judge
-  (landed, but one provider refusal on corpus item f03 under the new prompt,
-  matched by one under the old prompt) and the cookie workflow judge (GSTA-91:
-  held on one new false pass on a07, zero new-request format errors; the hold was
-  released on GStack Minder's 2026-10-29 ruling and it now sends the schema; today's request itself false-passes a07 in `old-b` and on
-  both valid `old-a` samples, and a08 in `old-a`, so the prose step targets those). Reuse `test/fixtures/judge-calibration`
-  and `scripts/judge-calibration.ts`. Priority P3. Effort M.
-- **Uncalibrated workflow-judge configurations** — build a corpus and calibrate
-  schema transport for the frontier configuration (review/SKILL.md workflow); it
-  stays on today's request. The cookie configuration
-  (setup-browser-cookies/SKILL.md workflow) has a corpus and a held comparison-1
-  (GSTA-91); it moved to the schema on GStack Minder's 2026-10-29 release ruling. After any transport change,
-  re-run the review and cookie workflow judges. Priority P3. Effort M.
+- **Judge prose and rubric cleanup (W2 deferral)** — the arm judge now sends a
+  JSON schema; its prompt-audit s11 M1-M7 prose cleanup is still open. Reuse `test/fixtures/judge-calibration` and
+  `scripts/judge-calibration.ts`. Priority P3. Effort M.
 - **Claude model auto-detection for the skill overlay** — when no
   `claude_overlay_model` is set, detect the Claude Code model (`ANTHROPIC_MODEL`,
   user and managed settings `model`) in `./setup` and render its pinned overlay.
@@ -1686,8 +1654,7 @@ separately, so the change alters a paid verdict and needs its own paid run.
 
 **What:** GSTA-49 TM3 (2026-10-18) moved every remaining old-model paid pin to the current generation: the
 `claude-opus-4-7` pins in `skill-e2e-{plan,plan-prosons,design,office-hours-phase4,qa-bugs}` follow
-`resolveEvalModel('capture')`, the overlay fixtures pin `claude-opus-5-5` and `claude-sonnet-5-5`, the cookie workflow
-judge pins `claude-sonnet-5-5`, and `codex-sol-scope-termination` runs on `gpt-6.1-sol` (still rendering the
+`resolveEvalModel('capture')`, the overlay fixtures pin `claude-opus-5-5` and `claude-sonnet-5-5`, and `codex-sol-scope-termination` runs on `gpt-6.1-sol` (still rendering the
 `gpt-5.6-sol` overlay). Three things remain:
 
 - The base `claude-dedicated-tools-vs-bash` fixture now duplicates `claude-dedicated-tools-vs-bash-opus-5-5`.

@@ -20,16 +20,19 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { classifyPath } from './review-depth';
-import { AUTH_PATH_PREFIXES, AUTH_PATH_TOKENS, KEY_NAME, MONEY_LINE, MONEY_LINE_TOKENS, MONEY_PAIRS, MONEY_PATH_TOKENS, SECRET_LINE, SECRET_PATH, matchRisk } from './review-risk';
+import { classifyPath, unconsumedData, type ClassInput } from './review-depth';
+import { AUTH_PATH_PREFIXES, AUTH_PATH_TOKENS, KEY_NAME, MONEY_LINE, MONEY_LINE_TOKENS, MONEY_PAIRS, MONEY_PATH_TOKENS, MONEY_USD_WORDS, PROSE_PATH, REPORTED_COST_WORDS, RESULTS_TREE, SECRET_LINE, SECRET_PATH, SECRET_SCAN, SPEND_PAIRS, TOKEN_PATH, TOKEN_SOURCE, USD_COMPARE, matchRisk } from './review-risk';
 
 export const TARGETED_CLASSES = ['money', 'gate', 'auth', 'secret'] as const;
 export type TargetedClass = (typeof TARGETED_CLASSES)[number];
 
+/** Whether one added or deleted line reads a credential (SECRET_LINE): lib/review-exclude.ts keeps a matched file that has one. */
+export const secretLine = (line: string) => SECRET_LINE.some(r => r.test(line));
+
 /** A hash of the patterns that decide the classes, not of this file's bytes: a comment edit keeps it, a pattern edit changes it. */
 export const TARGETED_RULES = createHash('sha256').update(JSON.stringify({
-  TARGETED_CLASSES, MONEY_PATH_TOKENS, MONEY_LINE_TOKENS, MONEY_PAIRS, AUTH_PATH_TOKENS, AUTH_PATH_PREFIXES, KEY_NAME,
-  patterns: Object.entries({ MONEY_LINE, SECRET_LINE, SECRET_PATH: [SECRET_PATH] }).map(([k, v]) => [k, v.map(r => `/${r.source}/${r.flags}`)]),
+  TARGETED_CLASSES, MONEY_PATH_TOKENS, MONEY_LINE_TOKENS, MONEY_PAIRS, SPEND_PAIRS, REPORTED_COST_WORDS, MONEY_USD_WORDS, AUTH_PATH_TOKENS, AUTH_PATH_PREFIXES, KEY_NAME, SECRET_SCAN,
+  patterns: Object.entries({ MONEY_LINE, USD_COMPARE, RESULTS_TREE: [RESULTS_TREE], SECRET_LINE, SECRET_PATH: [SECRET_PATH], TOKEN_PATH: [TOKEN_PATH], TOKEN_SOURCE: [TOKEN_SOURCE], PROSE_PATH: [PROSE_PATH] }).map(([k, v]) => [k, v.map(r => `/${r.source}/${r.flags}`)]),
 })).digest('hex').slice(0, 16);
 
 export interface TargetedInput {
@@ -44,6 +47,9 @@ export interface TargetedInput {
   root?: string | readonly string[];
   /** Collector failures (a diff git could not list). */
   errors?: readonly { code: string; input: string }[];
+  /** The collector's consumer scan and drawings (ClassInput): a data file no code reads names no money. */
+  consumed?: ClassInput['consumed'];
+  drawings?: ClassInput['drawings'];
 }
 export interface TargetedResult { classes: TargetedClass[]; reasons: string[]; errors: string[]; rules: string }
 
@@ -58,7 +64,7 @@ export function targetedClasses(i: TargetedInput): TargetedResult {
   if (errors.length) return { classes: [...TARGETED_CLASSES], reasons: errors.map(e => `fail-closed: ${e}`), errors, rules: TARGETED_RULES };
   const why = new Map<TargetedClass, string>();
   if ((i.gateTagged ?? 0) > 0) why.set('gate', `gate scan tagged ${i.gateTagged} hunk(s)`);
-  for (const [c, reason] of matchRisk({ codePaths: code, added: i.added, removed: i.removed, scopeAuth: s!.SCOPE_AUTH === 'true' })) if ((TARGETED_CLASSES as readonly string[]).includes(c)) why.set(c as TargetedClass, reason);
+  for (const [c, reason] of matchRisk({ codePaths: code, dataPaths: code.filter(p => unconsumedData(i, p)), added: i.added, removed: i.removed, scopeAuth: s!.SCOPE_AUTH === 'true' })) if ((TARGETED_CLASSES as readonly string[]).includes(c)) why.set(c as TargetedClass, reason);
   const classes = TARGETED_CLASSES.filter(c => why.has(c));
   return { classes, reasons: classes.map(c => why.get(c)!), errors: [], rules: TARGETED_RULES };
 }
@@ -80,6 +86,12 @@ export function targetedPatchId(root: string, mergeBase: string): string {
   const diff = git(['diff', '--no-color', '--no-ext-diff', mergeBase, 'HEAD']);
   if (diff.status !== 0 || !diff.stdout.trim()) return 'none';
   return git(['patch-id', '--verbatim'], diff.stdout).stdout?.trim().split(/\s+/)[0] || 'none';
+}
+
+/** What a targeted render records: the patch the reader reads and the commit it sits on, which receipt write binds to its product patch. */
+export function targetedRead(root: string, mergeBase: string): { patch_id: string; head: string | null } {
+  const head = spawnSync('git', ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], { cwd: root, encoding: 'utf8', timeout: 30_000 }).stdout?.trim();
+  return { patch_id: targetedPatchId(root, mergeBase), head: head || null };
 }
 
 /** A class list as printed and recorded: comma-joined, or `none`. */
