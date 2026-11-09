@@ -14,17 +14,18 @@ import { EXIT } from '../lib/headless-artifacts';
 import { LAND_KEY_VERSION, MERGE_KEY_VERSION, RELEASE_GATE_KEY_VERSION, validatePolicy } from '../lib/ship-policy';
 import { BASE_POLICY, cleanup, makeFixtureRepo, runBin, type FixtureRepo } from './helpers/restamp-fixture';
 import { shippedBody } from './helpers/ship-queue-train-fixture';
-import { persist, repoIdentity } from '../lib/ship-queue-train-record';
+import { persist, repoIdentity } from '../crew/lib/ship-queue-train-record';
 import { rewriteStamps, tentativeMentions } from '../lib/restamp';
-import { bumpVersion } from '../lib/version-gate-train';
+import { bumpVersion } from '../crew/lib/version-gate-train';
 import { openRelease } from '../lib/release-stamp';
-import { runMergedChecks } from '../lib/land-merged-checks';
-import { readLock, writeLock } from '../lib/ship-queue-land-lock';
+import type { MergedRun } from '../lib/land-merged-checks';
+import { bunIsolationArgs } from '../lib/bun-isolation';
+import { readLock, writeLock } from '../crew/lib/ship-queue-land-lock';
 import { flakyGit } from './helpers/flaky-git';
-import { runBackstop } from '../scripts/train-backstop';
-import { readTrainNotes } from '../scripts/release-cut';
-import { gitIn } from '../scripts/train-gate';
-import type { GhRunner } from '../scripts/recover-receipts';
+import { runBackstop } from '../crew/scripts/train-backstop';
+import { readTrainNotes } from '../crew/scripts/release-cut';
+import { gitIn } from '../crew/scripts/train-gate';
+import type { GhRunner } from '../crew/scripts/recover-receipts';
 import { TRAIN_BLOCK } from './helpers/ship-queue-train-fixture';
 
 const REQUIRED = ['free-tests', 'Check VERSION is not stale vs queue'];
@@ -113,6 +114,13 @@ const landNotes = (fx: Fx) => {
 };
 /** Whether a clone holds a commit. */
 const spawnCheck = (dir: string, sha: string) => spawnSync('git', ['-C', dir, 'cat-file', '-e', `${sha}^{commit}`], { timeout: 30_000 }).status === 0;
+/** runMergedChecks in a child Bun: on Linux it makes its caller a non-dumpable child subreaper for good, and a test runner that is one never reaps the orphans later test files leave, which hung test/ubicloud-runner-recovery.test.ts in the same process (GST-1613). */
+function runMergedChecks(root: string, base: string, pin: string, checks: string[], ms?: number): MergedRun {
+  const lib = JSON.stringify(path.join(import.meta.dir, '..', 'lib', 'land-merged-checks.ts'));
+  const r = spawnSync(process.execPath, [...bunIsolationArgs(), '-e', `const { runMergedChecks } = await import(${lib}); const [root, base, pin, checks, ms] = JSON.parse(await Bun.stdin.text()); console.log(JSON.stringify(runMergedChecks(root, base, pin, checks, ms ?? undefined)));`], { input: JSON.stringify([root, base, pin, checks, ms ?? null]), encoding: 'utf8', timeout: 60_000 });
+  if (r.status !== 0) throw new Error(`runMergedChecks child exited ${r.status ?? r.signal}: ${r.stderr}`);
+  return JSON.parse(r.stdout) as MergedRun;
+}
 /** Commit a file straight onto origin/main (another PR that landed first). */
 function moveMain(fx: Fx, file: string, text: string): string {
   const { repo } = fx;
@@ -133,7 +141,7 @@ describe('land --pin: direct merge at the PR\'s own green head', () => {
     const r = land(fx, '7', pin);
     expect(r.err).toBe('');
     expect(r.status).toBe(EXIT.ok);
-    expect(fx.read().mergeArgs).toEqual(['7', '--squash', '--match-head-commit', pin]);
+    expect(fx.read().mergeArgs).toEqual(['7', '--squash', '--match-head-commit', pin, '--subject', 'PR 7 (#7)']);
     const main = remote(fx, 'main');
     expect(fx.repo.git('rev-parse', main + '^1')).toBe(base);
     expect(r.out).toContain('MERGED: #7 as ' + main);
@@ -528,6 +536,39 @@ describe('land --pin: refusals (nothing merged)', () => {
     expect(r.err).toContain('gstack-ship-queue ready --pr 16');
   }, 90_000);
 
+  // Value: protects=under GSTACK_PLAN_RECORD=require land refuses a READY note with no plan or another line than the PR body, lands a matching one, and a merged rerun skips the check; fails_when=landPlan's wiring in landDirect is dropped or runs after the merge; why_new=plan-record.test.ts covers landPlan only; seam=none; no_claim=ready's resolution (the note is written directly)
+  test('QUEUE_PLAN_MISMATCH under GSTACK_PLAN_RECORD=require: no plan on the READY note or a stale line refuses and merges nothing; a matching note lands; a merged rerun skips the check', () => {
+    const fx = setup();
+    const pin = openPr(fx, '26');
+    const body = shippedBody('26', pin) + '\nPlan: exempt: bug fix\n';
+    fx.write(d => { d.prs['26'].body = body; });
+    const req = (extra: string[] = []) => runBin(fx.repo, 'gstack-ship-queue', ['land', '--pr', '26', '--pin', pin, '--base', 'main', ...extra], { ...fx.env, GSTACK_PLAN_RECORD: 'require' });
+    const bare = req();
+    refused(fx, bare, 'QUEUE_PLAN_MISMATCH');
+    expect(bare.err).toContain('carries no plan record');
+    const notePlan = (line: string) => {
+      const prior = process.env.GSTACK_STATE_ROOT;
+      process.env.GSTACK_STATE_ROOT = path.join(fx.repo.root, 'ready-state');
+      try {
+        const now = new Date().toISOString();
+        persist(fx.repo.work, [{ schema: 1, kind: 'ready', repo_key: repoIdentity(fx.repo.work).key, pr: '26', head: pin, base_sha: fx.repo.git('rev-parse', 'origin/main'), ready_at: now, screen: { choice: 'no-screen', policy: null, nonce: null, run: null, merge_sha: null }, updated_at: now, plan: { line, state: 'exempt', reason: line.replace('Plan: exempt: ', ''), resolver: 1 } } as any]);
+      } finally { if (prior === undefined) delete process.env.GSTACK_STATE_ROOT; else process.env.GSTACK_STATE_ROOT = prior; }
+    };
+    notePlan('Plan: exempt: docs only');
+    const stale = req();
+    refused(fx, stale, 'QUEUE_PLAN_MISMATCH');
+    expect(stale.err).toContain('but the PR body now says "Plan: exempt: bug fix"');
+    notePlan('Plan: exempt: bug fix');
+    const ok = req();
+    expect(ok.status).toBe(EXIT.ok);
+    expect(ok.out).toContain('PLAN: exempt bug fix (from the READY note)');
+    fx.write(d => { d.prs['26'].body = shippedBody('26', pin); });
+    const again = req();
+    expect(again.status).toBe(EXIT.ok);
+    expect(again.out).toContain('already merged');
+    expect(again.out).not.toContain('QUEUE_PLAN_MISMATCH');
+  }, 120_000);
+
   test('QUEUE_LAND_CHECKS: a red check, a pending check, and a required check GitHub never scheduled', () => {
     const fx = setup();
     const pin = openPr(fx, '17');
@@ -539,6 +580,7 @@ describe('land --pin: refusals (nothing merged)', () => {
     const missing = land(fx, '17', pin);
     refused(fx, missing, 'QUEUE_LAND_CHECKS');
     expect(missing.err).toContain('Check VERSION is not stale vs queue');
+    expect(missing.out + missing.err).toContain('cannot be dispatched, so edit the PR title or body to rerun it');
   }, 90_000);
 
   test('QUEUE_LAND_NOT_CLEAN: GitHub does not report the PR mergeable and clean', () => {
@@ -617,7 +659,7 @@ describe('land --pin: fail closed and merge methods', () => {
     fx.write(d => { d.prs['25'].baseRefName = 'main'; });
     const r = land(fx, '25', pin);
     expect(r.err).toBe('');
-    expect(fx.read().mergeArgs).toEqual(['25', '--merge', '--match-head-commit', pin]);
+    expect(fx.read().mergeArgs).toEqual(['25', '--merge', '--match-head-commit', pin, '--subject', 'PR 25 (#25)']);
   }, 90_000);
 
   test('land reads the policy after fetching the base: a required check main added since the last fetch is enforced', () => {
@@ -732,7 +774,7 @@ describe('merge: direct | train', () => {
     expect(errs({ land: { merged_checks: ['bun run typecheck'] } })).toContain('introduced in gstack ' + LAND_KEY_VERSION);
     const bad = (land: unknown) => errs({ land, min_gstack_version: LAND_KEY_VERSION });
     expect(bad({ merged_checks: [] })).toContain('land.merged_checks: must list 1 to 16 commands');
-    expect(bad({ merged_checks: ['a'], timeout: 5 })).toContain('land.timeout: unknown key');
+    expect(bad({ merged_checks: ['a'], timeout: 5 })).toBe('');
     expect(bad({ merged_checks: ['a\nb', ' '] })).toBe('land.merged_checks[0]: must be one line of at most 512 characters\nland.merged_checks[1]: must be a non-empty command');
     expect(bad(['a'])).toContain('land: must be { merged_checks } or null');
   });
@@ -859,7 +901,7 @@ describe('land --pin: the release PR (docs/ship-policy.md#release-stamp)', () =>
   }, 120_000);
 });
 
-/** A backstop freeze on origin's notes (what scripts/train-backstop.ts writes on a red gate), written from another state root. */
+/** A backstop freeze on origin's notes (what crew/scripts/train-backstop.ts writes on a red gate), written from another state root. */
 function freezeMain(fx: Fx, over: Record<string, unknown> = {}): string {
   const main = remote(fx, 'main');
   const prior = process.env.GSTACK_STATE_ROOT;
@@ -881,7 +923,7 @@ const originRecords = (fx: Fx, kind: string): any[] => {
 const freezeOf = (fx: Fx) => { const all = originRecords(fx, 'freeze'); expect(all).toHaveLength(1); return all[0]; };
 
 /**
- * scripts/train-backstop.ts on main's head from its own clone (the CI runner's checkout) with a scripted gh: no green
+ * crew/scripts/train-backstop.ts on main's head from its own clone (the CI runner's checkout) with a scripted gh: no green
  * train covers it, and the gate run concludes as asked; `during` runs while the gate runs (a land meanwhile).
  */
 function backstopOn(fx: Fx, gate: 'success' | 'failure' | 'cancelled', run: number, during?: () => void) {
@@ -920,7 +962,7 @@ describe('land --pin --repair: the one way through a backstop freeze under merge
     expect(r.err).toBe('');
     expect(r.status).toBe(EXIT.ok);
     expect(r.out).toMatch(/^FREEZE: warn only: train backstop froze main \(backstop red on main [0-9a-f]{12}: .*\); the base policy declares release_gate/m);
-    expect(fx.read().mergeArgs).toEqual(['7', '--squash', '--match-head-commit', pin]);
+    expect(fx.read().mergeArgs).toEqual(['7', '--squash', '--match-head-commit', pin, '--subject', 'PR 7 (#7)']);
     expect(freezeOf(fx)).toMatchObject({ train: 'backstop', repair: null, cleared_at: null });
   }, 90_000);
 
@@ -955,7 +997,7 @@ describe('land --pin --repair: the one way through a backstop freeze under merge
     expect(r.err).toBe('');
     expect(r.status).toBe(EXIT.ok);
     expect(r.out).toContain(`REPAIR: #7@${pin7.slice(0, 12)} admitted under the land lock`);
-    expect(fx.read().mergeArgs).toEqual(['7', '--squash', '--match-head-commit', pin7]);
+    expect(fx.read().mergeArgs).toEqual(['7', '--squash', '--match-head-commit', pin7, '--subject', 'PR 7 (#7)']);
     expect(fx.read().lockAtMerge).toMatchObject({ pr: '7', journal: 'land-pin:' + pin7 });
     expect(freezeOf(fx)).toMatchObject({ train: 'backstop', repair: { pr: '7', head: pin7, train: null }, cleared_at: null, cleared_by: null });
     expect(landNotes(fx)).toEqual([expect.objectContaining({ pr: '7', pin: pin7, merge_sha: remote(fx, 'main') })]);
@@ -963,7 +1005,7 @@ describe('land --pin --repair: the one way through a backstop freeze under merge
     expect(second.err).toContain('(QUEUE_TRAIN_FROZEN)');
     expect(second.err).toContain(`repair #7@${pin7.slice(0, 12)}`);
     expect(land(fx, '8', pin8).err).toContain('(QUEUE_TRAIN_FROZEN)');
-    expect(fx.read().mergeArgs).toEqual(['7', '--squash', '--match-head-commit', pin7]);
+    expect(fx.read().mergeArgs).toEqual(['7', '--squash', '--match-head-commit', pin7, '--subject', 'PR 7 (#7)']);
   }, 120_000);
 
   test('a recorded repair that never merged at its pin gives way to the next --repair; a repair train holding the freeze does not', () => {

@@ -20,7 +20,7 @@ export type PathClass = 'docs' | 'tests' | 'code';
 export type Depth = 'light' | 'standard' | 'full';
 export type Effort = 'light' | 'medium' | 'full' | 'host';
 export type Role = 'specialist' | 'red-team' | 'adversarial-native' | 'outside-voice' | 'fix-check' | 'targeted';
-export type Step = 'full' | 'scoped' | 'fix-check' | 'voices' | 'platform' | 'done' | 'stop';
+export type Step = 'full' | 'scoped' | 'fix-check' | 'voices' | 'platform' | 'targeted' | 'done' | 'stop';
 
 export const SPECIALISTS = ['testing', 'maintainability', 'security', 'performance', 'data-migration', 'api-contract', 'design', 'simplification', 'state-machines'] as const;
 export type Specialist = (typeof SPECIALISTS)[number];
@@ -46,7 +46,7 @@ export const LIGHT_ADVERSARIAL_REASON = 'backtest inconclusive (GSTA-147 D5)';
 const CLASS_RANK: Record<DiffClass, number> = { docs: 0, tests: 1, code: 2, gate: 3 };
 const DEPTH_RANK: Record<Depth, number> = { light: 0, standard: 1, full: 2 };
 
-const AGENT_PROSE = [/(^|\/)SKILL\.md(\.tmpl)?$/, /(^|\/)sections\//, /^scripts\/resolvers\//, /^docs\/[^/]*-policy\.md$/, /^docs\/(captain|unattended|pregate)\.md$/, /(^|\/)DRIVER\.md(\.tmpl)?$/, /(^|\/)templates\//, /(^|\/)(AGENTS|CLAUDE|ETHOS)\.md$/, /(^|\/)specialists\//, /(^|\/)checklist\.md$/, /^\.gstack\//];
+const AGENT_PROSE = [/(^|\/)SKILL\.md(\.tmpl)?$/, /(^|\/)sections\//, /^scripts\/resolvers\//, /^docs\/[^/]*-policy\.md$/, /^(crew\/)?docs\/(captain|unattended|pregate)\.md$/, /(^|\/)DRIVER\.md(\.tmpl)?$/, /(^|\/)templates\//, /(^|\/)(AGENTS|CLAUDE|ETHOS)\.md$/, /(^|\/)specialists\//, /(^|\/)checklist\.md$/, /^\.gstack\//];
 /** gstack-diff-scope's TEST_PATH_RE (the test-bootstrap rule), plus fixture directories. */
 const TEST_PATH = [/(^|\/)(tests?|spec|__tests__)\/|(^|\/)tests?\.py$|(^|\/)test_[^/]+\.py$|_test\.(go|py|rb|ts|js|exs|dart)$|\.(test|spec)\.[jt]sx?$|_spec\.rb$|Test\.(java|kt)$/, /(^|\/)fixtures?\//];
 const DOC_PATH = /\.(md|mdx|markdown|rst|txt|adoc)$/i;
@@ -57,7 +57,7 @@ const HARNESS_PINS = /^scripts\/harness-pins\//;
 /** Gate paths, the review-depth machinery included: an edit to how much review runs gets the most review. */
 const GATE_PATH = [
   /(^|\/)\.github\/workflows\//, SECRET_PATH, /state-root/, /(^|\/)(pregate|gate|ship-receipt|ship-policy)[^/]*\.(ts|sh|json)$/, /(^|\/)bin\/gstack-(pregate|gate|ship-receipt|verify-gate|ci-gate)$/,
-  /^lib\/review-(depth|collect|scope|targeted|risk|exclude)\.ts$/, /^lib\/redact-(engine|patterns)\.ts$/, /^lib\/default-base\.ts$/, /^review\/specialists\/targeted\.md$/, /^bin\/gstack-review-plan$/, /^lib\/ship-queue[^/]*\.ts$/, /^lib\/regen\.ts$/, /^\.gstack\/(generated|always-run)\.json$/, /^ship\/sections\/(review-army|adversarial)\.md\.tmpl$/, /^scripts\/resolvers\/review-army\.ts$/,
+  /^lib\/review-(depth|collect|scope|targeted|risk|exclude)\.ts$/, /^lib\/redact-(engine|patterns)\.ts$/, /^lib\/default-base\.ts$/, /^review\/specialists\/targeted\.md$/, /^bin\/gstack-review-plan$/, /^(crew\/)?lib\/ship-queue[^/]*\.ts$/, /^lib\/regen\.ts$/, /^\.gstack\/(generated|always-run)\.json$/, /^ship\/sections\/(review-army|adversarial)\.md\.tmpl$/, /^scripts\/resolvers\/review-army\.ts$/,
 ];
 
 /** The path rules lib/review-exclude.ts keeps a matched file for: a gate path, agent prose, or a data-shaped config file. */
@@ -384,6 +384,10 @@ export interface History {
   lean?: boolean;
   /** Fix-checks already run in this invocation (lean: the grant adds one only after the first). */
   fixChecks?: number;
+  /** The Step 9 /ship Step 16 stage 2.1 inserted for edits after the review bound (gstack-review-plan --post-review). */
+  postReview?: boolean;
+  /** In the loop, the CLI bound `granted` to the last fix-check's own stop head, its commit (--range-base): a new grant, never the previous link's. */
+  chained?: boolean;
 }
 export interface NextStep { step: Step; reason: string }
 
@@ -398,13 +402,17 @@ export interface NextStep { step: Step; reason: string }
  * The cap limits fix rounds, not Step 11's voices: on gate class any stop waits for them (GST-967),
  * and the owner's recorded grant (`granted`) turns the stop after a round-2 full pass with a fixed finding, or after a round-2
  * fix-check when `fixChecks` says it was the only one (GEVA-223), into its one fix-check; a fix-check never earns another, so
- * the grant cannot repeat.
+ * the grant cannot repeat. Edits after the review bound (`postReview`) that follow a fix-check are a new stop, and a new grant
+ * there adds one fix-check, the next link of the chain finish counts (GST-1676, docs/ship-policy.md#fix-check-chain). In the
+ * loop, a grant the CLI bound to the last fix-check's own stop head (`chained`) adds one more the same way (GST-1681).
  */
 export function nextStep(h: History, depth?: Depth): NextStep {
   const n = h.lean ? leanStep(h, depth) : loopStep(h, depth);
   if (n.step !== 'stop') return n;
   if (h.gate && !h.adversarialRan) return { step: 'voices', reason: `gate class: Step 11's ${h.lean ? 'one reader' : 'voices (adversarial, outside, targeted)'} run${h.lean ? 's' : ''} before the owner's exit, then ask again with --adversarial-ran (${n.reason})` };
   const afterFixCheck = h.last === 'fix-check' && h.fullPasses === FULL_PASS_CAP - 1 && h.fixChecks === 1;
+  if (h.postReview && h.last === 'fix-check' && h.granted && !h.blockingOpen) return { step: 'fix-check', reason: `the owner's grant ${h.granted} adds one scoped fix-check for the edits after the last fix-check, a new link of the fix-check chain (docs/ship-policy.md#fix-check-chain); a later post-review edit needs a grant of its own` };
+  if (h.chained && h.last === 'fix-check' && h.granted && !h.blockingOpen) return { step: 'fix-check', reason: `the owner's grant ${h.granted} adds one scoped fix-check at the last fix-check's stop, a new link of the fix-check chain (docs/ship-policy.md#fix-check-chain); another stop needs a grant of its own` };
   if (!h.lean && h.granted && !h.blockingOpen && (afterFixCheck || (h.last === 'full' && h.fullPasses === FULL_PASS_CAP))) return { step: 'fix-check', reason: `the owner's grant ${h.granted} adds one scoped fix-check after round ${FULL_PASS_CAP} (review_loop_exception), ${afterFixCheck ? 'never a second' : 'never a fourth round'}` };
   return n;
 }

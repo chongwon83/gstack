@@ -15,7 +15,7 @@ import { buildRunCheck } from './pregate/run-check';
 import { classifyDiff } from './review-depth';
 import { wtreeFingerprint } from './script-invocation';
 import { audit } from './ship-audit';
-import { bin, carryNoneLine, firstLine, flagReader, gh, git, hostedOrigin, laneConcurrency, laneLine, lanes, Report, runLanes, shipPolicy, shipRunMarker, short } from './ship-bin-common';
+import { bin, carryNoneLines, firstLine, flagReader, gh, git, hostedOrigin, laneConcurrency, laneLine, lanes, Report, runLanes, shipPolicy, shipRunMarker, short } from './ship-bin-common';
 
 export const PREFLIGHT_HELP = `gstack-ship-preflight — /ship Steps 1-3 and Step 5's pregate and lanes in one call (ship/SKILL.md)
 
@@ -85,7 +85,7 @@ function integrate(cwd: string, base: string, run: string | undefined, r: Report
   const stat = git(cwd, ['diff', forkPoint(cwd, base), '--shortstat']).stdout.trim();
   const lines = [...stat.matchAll(/(\d+) (insertion|deletion)/g)].reduce((n, m) => n + Number(m[1]), 0);
   const commits = git(cwd, ['rev-list', '--count', `origin/${base}..HEAD`]).stdout.trim();
-  r.add(`DIFF: ${stat || 'no changes'}; commits=${commits || 0}${lines > 200 ? '; over 200 lines: recommend /plan-eng-review or /autoplan' : ''}`);
+  r.add(`DIFF: ${stat || 'no changes'}; commits=${commits || 0}${lines > 200 ? '; over 200 lines: recommend /autoplan' : ''}`);
   const pr = hostedOrigin(cwd) ? gh(cwd, ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'number', '--jq', '.[0].number // empty']) : null;
   const n = pr?.stdout.trim() ?? '';
   if (!pr) r.add('PR: not checked (origin is a local path, not a hosted remote gh can map; Step 0 uses git-native commands)');
@@ -113,7 +113,7 @@ function integrate(cwd: string, base: string, run: string | undefined, r: Report
   const scope = bin(cwd, 'gstack-diff-scope', [`origin/${base}`], 60_000).stdout;
   const scopeError = /^SCOPE_ERROR=(?!unmatched)(\S+)/m.exec(scope)?.[1];
   if (scopeError) r.add(`SCOPE: unknown (gstack-diff-scope origin/${base}: SCOPE_ERROR=${scopeError})`);
-  else r.add(`SCOPE: frontend=${/SCOPE_FRONTEND=true/.test(scope)}${/SCOPE_FRONTEND=true/.test(scope) ? ' (Step 9 runs the design lite check; mention /design-review when no design review exists)' : ''}`);
+  else r.add(`SCOPE: frontend=${/SCOPE_FRONTEND=true/.test(scope)}${/SCOPE_FRONTEND=true/.test(scope) ? ' (Step 9 runs the static design lite check only, no preview declared; mention /design-review when no design review exists)' : ''}`);
   if (!merge(cwd, base, r)) return false;
   const marker = run && shipRunMarker(cwd);
   try { if (marker) fs.writeFileSync(marker, `${run}\n`); } catch (e) { r.stop(`cannot record /ship run ${run} in ${marker} (${firstLine((e as Error).message)}): the base is merged, but a later full preflight could merge again under this run's reviews; fix that, then rerun`); return false; }
@@ -203,7 +203,7 @@ async function tests(cwd: string, base: string, list: { label: string; command: 
   r.add(run.line);
   const ran = await runLanes(cwd, list, run.concurrency, { base });
   const results = ran.map(laneLine);
-  for (const [i, l] of results.entries()) { const none = carryNoneLine(ran[i]!); if (none) r.add(none); r.add(l.line); }
+  for (const [i, l] of results.entries()) { for (const none of carryNoneLines(ran[i]!)) r.add(none); r.add(l.line); }
   const bad = results.filter(l => !l.ok);
   if (bad.length) { r.stop(`${bad.length} lane(s) failed or ran zero tests: Step 5 triage (read each log; a free-suite shard failure reruns its file list per measure.md); in-branch failures stop the ship`); return; }
   r.next('Step 6: select eval suites for prompt-related changes with the project\'s selector, then Step 7');

@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { promptHash, sectionTexts, withWorkspace, workspaceParagraph, workspaceStep } from '../lib/review-brief';
 import { CHUNK_CHARS, PARENT_ONLY_QA, buildManifest, chunkCount, chunkOf, markReader, renderStage, specialistFindings, type Manifest } from '../lib/review-pass';
 import type { Dispatch } from '../lib/review-depth';
+import { FIXTURE_MARKER } from '../lib/fixture-marker';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const BIN = path.join(ROOT, 'bin');
@@ -236,6 +237,27 @@ describe('the targeted reader in a pass (GST-257 on main)', () => {
     const row = fs.readFileSync(m.ledger, 'utf8').trim().split('\n').map(l => JSON.parse(l)).find(e => e.event === 'rendered' && e.reader === 'targeted');
     const cliRow = fs.readFileSync(path.join(dir, '.state/cli/review-ledger.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l)).at(-1);
     for (const k of ['classes', 'rules', 'brief_sha', 'diff_base', 'patch_id', 'sha256']) expect(row[k]).toEqual(cliRow[k]);
+  }, 180_000);
+});
+
+describe('the targeted-only read in the Capy pass program (GST-1598, GST-1607)', () => {
+  // Value: protects=a NEXT: targeted manifest driven through the checked-in pass program runs its one targeted reader (voices stage)
+  //   and ends on NEXT: judge; fails_when=the program runs only first, specialists and red-team for a targeted manifest, so it creates
+  //   no reader (lib/capy-review-pass.js activated voices only for fix-check); seam=lib/capy-review-pass.js stage selection;
+  //   no_claim=what the reader finds
+  test('a targeted-only manifest creates the one targeted reader', async () => {
+    const { dir, env } = repo();
+    const sh = (c: string) => { const r = spawnSync('bash', ['-c', c], { cwd: dir, env, encoding: 'utf8', timeout: 60_000 }); if (r.status !== 0) throw new Error(r.stderr); return r.stdout; };
+    sh("printf 'export const spendCapUsd = 25;\\n' > src/billing.ts && git add -A && git commit -qm money");
+    const read = sh('git rev-parse HEAD').trim();
+    const plan = spawnSync(path.join(BIN, 'gstack-review-plan'), ['--base', 'main', '--gate-tagged', '0', '--json'], { cwd: dir, env, encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+    const ran = JSON.parse(plan.stdout).targeted.targeted_patch_id as string;
+    sh("mkdir -p changelog.d && echo '- Each PR eval run now costs about $4.20.' > changelog.d/cost.md && git add -A && git commit -qm claim");
+    const h = host(dir, env);
+    const res = await runPass(h, { base: 'main', out: path.join(dir, '.state/run/p1'), pass: 'td1p1', planFlags: ['--gate-tagged', '0', '--pass', '1', '--last', 'fix-check', '--fixed-below', '--range-base', read, '--targeted-ran', ran] });
+    expect(res).toContain('NEXT: targeted');
+    expect(h.creates.map(c => c.title)).toEqual(['ship td1p1 targeted']);
+    expect(res).toContain('NEXT: judge');
   }, 180_000);
 });
 
@@ -704,6 +726,68 @@ describe('Capy pass program (fake host, real bins)', () => {
     expect(res).toContain('DOCS: README updated');
     expect(res).toContain('NEXT: apply the docs audit (Step 14.5)');
     expect(bin(dir, env, ['pass', '--base', 'main', '--out', path.join(dir, '.state/run/d2'), '--pass', 'x16b', '--audit-only']).status).not.toBe(0);
+  }, 240_000);
+
+  // Value: protects=Step 14.5's docs audit runs on the owner's agent_model at low effort, today's Sonnet 5.5 low when no preference is set, and an extras model still wins; fails_when=the audit-only pass ignores preferences.yaml (GST-1439: Opus crews audited on Sonnet), a missing file changes the default, or a given model is overwritten;
+  //   why_new=the audit model was a prose hard-code the driver copied into extras; seam=gstack-review-dispatch pass --audit-only; no_claim=reviewer passes and Steps 7 and 8, which keep their own models
+  test('the audit-only docs reader defaults to the owner agent_model at low effort; a given model wins', () => {
+    const { dir, env } = repo();
+    const prompt = path.join(dir, '.state/docs.prompt.md');
+    fs.mkdirSync(path.dirname(prompt), { recursive: true });
+    fs.writeFileSync(prompt, 'Run Step 14.5 as written.\n');
+    const prefs = path.join(dir, '.state/preferences.yaml');
+    fs.writeFileSync(prefs, 'agent_model: opus\n');
+    const audit = (id: string, e: NodeJS.ProcessEnv, model?: object) => {
+      const extras = path.join(dir, `.state/${id}.json`);
+      fs.writeFileSync(extras, JSON.stringify([{ name: 'docs', prompt_file: prompt, first: true, ...(model ? { model } : {}) }]));
+      const out = path.join(dir, '.state/run', id);
+      const r = bin(dir, e, ['pass', '--base', 'main', '--out', out, '--pass', id, '--audit-only', '--extras', extras]);
+      expect(r.status, r.stderr).toBe(0);
+      return { stdout: r.stdout, model: JSON.parse(fs.readFileSync(path.join(out, 'pass-manifest.json'), 'utf8')).readers[0].model };
+    };
+    const { GSTACK_PREFERENCES_FILE: _, ...noFile } = env;
+    const opus = audit('d-opus', { ...env, GSTACK_PREFERENCES_FILE: prefs });
+    expect(opus.model).toEqual({ model_id: 'anthropic/claude-opus-5-5', reasoning_mode: 'low' });
+    expect(opus.stdout).toContain('AUDIT_MODEL: anthropic/claude-opus-5-5 reasoning=low (agent_model');
+    expect(audit('d-none', noFile).model).toEqual({ model_id: 'anthropic/claude-sonnet-5-5', reasoning_mode: 'low' });
+    const given = { model_id: 'anthropic/claude-haiku-5-5', reasoning_mode: 'low' };
+    expect(audit('d-given', { ...env, GSTACK_PREFERENCES_FILE: prefs }, given).model).toEqual(given);
+    // Value: protects=agent_model host leaves the model to the lane and an unusable value falls back to Sonnet 5.5 low; fails_when=host is sent as a model or a bad value aborts the pass; why_new=only opus/none/given rows existed; seam=none; no_claim=none beyond protects
+    fs.writeFileSync(prefs, 'agent_model: host\n');
+    const host = audit('d-host', { ...env, GSTACK_PREFERENCES_FILE: prefs });
+    expect(host.model).toBeUndefined();
+    expect(host.stdout).toContain('AUDIT_MODEL: host');
+    fs.writeFileSync(prefs, 'agent_model: not a model!\n');
+    const bad = audit('d-bad', { ...env, GSTACK_PREFERENCES_FILE: prefs });
+    expect(bad.model).toEqual({ model_id: 'anthropic/claude-sonnet-5-5', reasoning_mode: 'low' });
+    expect(bad.stdout).toContain('ignored)');
+  }, 240_000);
+
+  // Value: protects=Steps 7 and 8's audit readers ride the reviewer pass on the owner's agent_model at low effort, Sonnet 5.5 low with no preference, and a given model wins; fails_when=the reviewer pass leaves an audit extra with no model, so it inherits the lane's model and effort, or the Capy skill's Sonnet hard-code comes back (GST-1449);
+  //   why_new=only the audit-only pass (Step 14.5) resolved AUDIT_MODEL; seam=gstack-review-dispatch pass with --extras; no_claim=reviewers and Step 11's voices, which keep their own models
+  test('Steps 7 and 8 audit extras on a reviewer pass default to the owner agent_model at low effort; a given model wins', () => {
+    const { dir, env } = repo();
+    const prompt = path.join(dir, '.state/audit.prompt.md');
+    fs.mkdirSync(path.dirname(prompt), { recursive: true });
+    fs.writeFileSync(prompt, 'Run the audit as written.\n');
+    const prefs = path.join(dir, '.state/preferences.yaml');
+    fs.writeFileSync(prefs, 'agent_model: opus\n');
+    const given = { model_id: 'anthropic/claude-haiku-5-5', reasoning_mode: 'low' };
+    const run = (id: string, e: NodeJS.ProcessEnv) => {
+      const extras = path.join(dir, `.state/${id}.json`);
+      fs.writeFileSync(extras, JSON.stringify([{ name: 'coverage', prompt_file: prompt, first: true }, { name: 'plan', prompt_file: prompt }, { name: 'given', prompt_file: prompt, model: given }]));
+      const out = path.join(dir, '.state/run', id);
+      const r = bin(dir, e, ['pass', '--base', 'main', '--out', out, '--pass', id, '--extras', extras, '--', '--depth-floor', 'full']);
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      const readers = JSON.parse(fs.readFileSync(path.join(out, 'pass-manifest.json'), 'utf8')).readers as { reader: string; model?: object }[];
+      return { stdout: r.stdout, model: (n: string) => readers.find(x => x.reader === `audit/${n}`)!.model };
+    };
+    const opus = run('a-opus', { ...env, GSTACK_PREFERENCES_FILE: prefs });
+    expect([opus.model('coverage'), opus.model('plan')]).toEqual([{ model_id: 'anthropic/claude-opus-5-5', reasoning_mode: 'low' }, { model_id: 'anthropic/claude-opus-5-5', reasoning_mode: 'low' }]);
+    expect(opus.model('given')).toEqual(given);
+    expect(opus.stdout).toContain('AUDIT_MODEL: anthropic/claude-opus-5-5 reasoning=low (agent_model');
+    const { GSTACK_PREFERENCES_FILE: _, ...noFile } = env;
+    expect(run('a-none', noFile).model('plan')).toEqual({ model_id: 'anthropic/claude-sonnet-5-5', reasoning_mode: 'low' });
   }, 240_000);
 
   // Value: protects=a pass id typed in capitals is read as its lowercase id, so the manifest, its titles and a resume agree, and an id with other characters is still refused naming the rule; fails_when=--pass P1 is refused as a missing flag (gstack-evals#191 /ship), a capitalized resume of p1 reads as another pass, or p_1 is accepted;
@@ -1404,6 +1488,38 @@ describe('the fetch sweep quarantines a stage that fetched (GST-1322 PR B)', () 
     expect(inventories.join('')).toContain('https://github.com/me/old.git#main');
     const v = bin(dir, env, ['verify', '--ledger', m.ledger]);
     for (const text of [res, v.stdout, ...inventories, fs.readFileSync(m.ledger, 'utf8'), fs.readFileSync(path.join(out, 'pass-manifest.json'), 'utf8')]) expect(text).not.toMatch(/FAKETOKEN|ci-bot|bot:/);
+  }, 240_000);
+
+  // Value: protects=a test run's fixture repositories left beside a stage (a root carrying the fixture marker, ship-bin's clone whose https://github.com/fx/fx.git origin resolves locally) neither quarantine the stage nor block its rerun, while an unmarked network clone in the same stage still does both;
+  //   fails_when=a reader's own `bun test` that timed out before cleanup, or a lane's background suite, quarantines the pass and FETCH_RERUN_BLOCKED stops it on the leftover fixture; why_new=GST-1695 (three /ship passes lost on 11-06/07 to /tmp/ship-bin-YUgvjd and a background suite's fixtures);
+  //   seam=gstack-review-dispatch sweep --phase end and --phase start; no_claim=that a clone made inside a live fixture root is seen
+  test('leftover test fixtures are printed as ignored and never block the rerun; an unmarked network clone beside them still does', async () => {
+    const { dir, env } = repo();
+    made.push(dir);
+    const out = path.join(dir, '.state/run/p1');
+    const beam = path.join(dir, '.state/BEAM');
+    const fixture = path.join(dir, '.state/gst-left');
+    const shipBin = path.join(dir, '.state/ship-bin-left/work');
+    const leftovers = () => {
+      clone(path.join(fixture, 'sweep-x', 'BEAM'));
+      fs.writeFileSync(path.join(fixture, FIXTURE_MARKER), '');
+      clone(shipBin);
+      expect(spawnSync('git', ['config', `url.${path.join(dir, '.state/ship-bin-left/origin.git')}.insteadOf`, 'https://github.com/sealed-org/BEAM.git'], { cwd: shipBin, encoding: 'utf8', timeout: 30_000 }).status).toBe(0);
+    };
+    const h = host(dir, env, { output: t => { if (t === 'ship f7p1 specialist-batched') { clone(beam); leftovers(); } return 'NO FINDINGS'; } });
+    const input = { base: 'main', out, pass: 'f7p1', planFlags: ['--depth-floor', 'full'] };
+    const blocked = await runPass(h, input);
+    const real = (p: string) => `'${fs.realpathSync(p)}'`;
+    expect(blocked).toContain(`FETCH_VIOLATION: stage=specialists attempt=1 kind=repo path=${real(beam)}`);
+    expect(blocked).toContain(`FETCH_IGNORED: stage=specialists attempt=1 path=${real(fixture)} reason=fixture-marker`);
+    expect(blocked).toContain(`FETCH_IGNORED: stage=specialists attempt=1 path=${real(shipBin)} reason=local-remote remote=https://github.com/sealed-org/BEAM.git`);
+    expect(blocked).toContain(`FETCH_RERUN_BLOCKED: stage=specialists attempt=2 path=${real(beam)}`);
+    expect(blocked).not.toMatch(/^FETCH_(VIOLATION|RERUN_BLOCKED): .*(gst-left|ship-bin-left)/m);
+    fs.rmSync(beam, { recursive: true, force: true });
+    const res = await runPass(h, input);
+    expect(res).toContain('NEXT: judge (Phase 4)');
+    expect(res).not.toContain('FETCH_RERUN_BLOCKED');
+    expect([fs.existsSync(fixture), fs.existsSync(shipBin)]).toEqual([true, true]);
   }, 240_000);
 });
 const briefDirOf = (h: ReturnType<typeof host>, title: string) => briefDir(h.creates.find(c => c.title === title)?.prompt ?? '');

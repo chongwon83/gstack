@@ -52,12 +52,25 @@ describe('write records the review depth at the checked-out head', () => {
     expect(r.review_depth).toMatchObject({ depth: 'light', class: 'code', base, registry: base, gate_scan: { tagged: 0, head } });
     expect(r.review_depth!.runtime_lines).toBeGreaterThanOrEqual(5);
     expect(r.review_depth!.runtime_lines).toBeLessThanOrEqual(50);
+    expect(r.design).toBeUndefined();
     const other = path.join(repo.root, 'other.md');
     const bad = writeReceipt(repo, other, ['--head', older]);
     expect(bad.status).toBe(EXIT.fail);
     expect(bad.err).toContain(`--head ${older.slice(0, 12)} is not the checked-out HEAD ${head.slice(0, 12)}`);
     expect(bad.err).toContain('(RECEIPT_INVALID)');
     expect(fs.existsSync(other)).toBe(false);
+  }, 60_000);
+
+  // Value: protects=a rendered-UI diff's receipt says only the static design check ran and why (GST-1718), from the same
+  //   diff-scope the depth reads; fails_when=write records no design field on a frontend range, or records one on a
+  //   backend-only range (test above); seam=none
+  test('a template-UI diff records design: static (no preview declared)', () => {
+    const repo = makeFixtureRepo(); repos.push(repo);
+    commit(repo, { 'src/ui/row.ts': "import { html } from 'lit';\nexport const row = (n: string) => html`<div class=\"row\">${n}</div>`;\n" });
+    const body = path.join(repo.root, 'body.md');
+    const ok = writeReceipt(repo, body);
+    expect(ok.status).toBe(EXIT.ok);
+    expect(receiptIn(body).design).toEqual({ mode: 'static', reason: 'no preview declared' });
   }, 60_000);
 
   // Value: protects=a receipt names the gstack release that wrote it, never a newer policy key its tree carries, so a
@@ -68,7 +81,7 @@ describe('write records the review depth at the checked-out head', () => {
     commit(repo, { 'lib/util.js': lines(3) });
     const installed = path.join(repo.root, 'installed-gstack');
     const sourceOnly = { recursive: true, filter: (file: string) => path.basename(file) !== 'node_modules' };
-    for (const dir of ['bin', 'lib', 'scripts']) fs.cpSync(path.join(ROOT, dir), path.join(installed, dir), sourceOnly);
+    for (const dir of ['bin', 'lib', 'scripts', 'crew']) fs.cpSync(path.join(ROOT, dir), path.join(installed, dir), sourceOnly);
     fs.writeFileSync(path.join(installed, 'VERSION'), '1.0.0.0\n');
     const body = path.join(repo.root, 'body.md');
     const write = runScriptSync(path.join(installed, 'bin', 'gstack-ship-receipt'), ['write', '--pr', '7', '--base', 'main', '--version', '1.0.0', '--session-kind', 'unattended', '--body', body],

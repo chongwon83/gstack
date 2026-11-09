@@ -1,17 +1,20 @@
 /**
  * ship-receipt — the handoff record, identifiers first (plan C5). Renders the
  * ```gstack-ship-receipt``` block from the `ship-receipt` schema in
- * lib/headless-artifacts.ts, puts it first in a PR body so truncation loses
- * prose rather than identifiers, reads it back from a PR through `gh`, and
+ * lib/headless-artifacts.ts, puts it in the PR body's Agent notes section (lib/agent-notes.ts) so
+ * the body opens with plain sentences, reads it back from a PR through `gh`, and
  * computes the P7 adoption census over merged PRs (deduplicated by run and
  * thread id against an owner-maintained thread cohort).
  */
 import { spawnSync } from 'node:child_process';
 import { ARTIFACT_SCHEMAS, checkSchema, type ShipReceipt, type ValidationError } from './headless-artifacts';
+import { agentNotesOrBody, splitAgentNotes, withAgentNotes } from './agent-notes';
 import { approvalSummary } from './approval-citations';
 import { FRAGMENT_README } from './changelog-fragments';
 import { renderIssueLines } from './issue-links';
 import { matchesAny } from './ship-policy';
+import { ruledNoteText } from './ruled-notes';
+import { laneExceptionBodyLines } from './test-lane-exception';
 import { stampFileKind, versionStampOnly } from './pregate/stamp-only';
 import { stampOnlyLine, type BranchSide } from './stamp-only';
 
@@ -20,7 +23,7 @@ const KEY_ORDER: Array<keyof ShipReceipt | 'docs'> = [
   'schema_version', 'pr', 'head', 'version', 'base', 'gated_tree', 'predecessor', 'tree', 'gate_reuse', 'gate', 'ci', 'ci_carried', 'spend_usd',
   'session_kind', 'artifacts_consumed', 'run', 'thread', 'policy', 'queue_mode', 'preregistration', 'history',
   'head_tree', 'product_patch_id', 'gstack_version', 'review_depth', 'pregate', 'requires_remote', 'issues', 'approval', 'docs', 'review_loop',
-  'review_loop_exception', 'review_targeted', 'review_exclude', 'carry', 'base_red', 'flaky_exception', 'no_stop',
+  'review_loop_exception', 'ruled_notes', 'mechanical', 'review_targeted', 'design', 'review_exclude', 'carry', 'base_red', 'flaky_exception', 'no_stop',
 ];
 
 /** Keys in the fixed order so identifiers lead; undefined values are dropped. */
@@ -42,10 +45,23 @@ export function renderReceiptBlock(receipt: ShipReceipt): string {
 }
 
 const BLOCK_RE = /```gstack-ship-receipt[ \t]*\r?\n([\s\S]*?)\r?\n```/;
+/** A legacy receipt that opens the body, with the runs block right after it, as /ship posted before the Agent notes section. */
+const LEGACY_TOP_RE = /^\s*```gstack-ship-receipt[ \t]*\r?\n[\s\S]*?\r?\n```[ \t]*(?:\r?\n|$)(?:\s*```gstack-receipt-runs[ \t]*\r?\n[\s\S]*?\r?\n```[ \t]*(?:\r?\n|$))?/;
 
-/** The first receipt block in a PR body, parsed; `found: false` when absent. */
+/**
+ * Where the receipt and its runs are read: the Agent notes section when it holds a receipt, else a legacy receipt that
+ * opens the body (a section added later without one never hides it), else the section; a body without a section
+ * gives the whole body. A receipt fence quoted in the readable part never binds.
+ */
+function receiptSource(body: string): string {
+  const notes = splitAgentNotes(body).notes;
+  if (notes === null || BLOCK_RE.test(notes)) return agentNotesOrBody(body);
+  return LEGACY_TOP_RE.exec(body)?.[0] ?? notes;
+}
+
+/** The receipt block a PR body carries (receiptSource), parsed; `found: false` when absent. */
 export function extractReceipt(body: string): { found: boolean; receipt?: ShipReceipt; raw?: string; errors: ValidationError[] } {
-  const m = BLOCK_RE.exec(body);
+  const m = BLOCK_RE.exec(receiptSource(body));
   if (!m) return { found: false, errors: [] };
   try {
     const parsed = JSON.parse(m[1]!);
@@ -103,7 +119,7 @@ export const RECEIPT_RUNS_KEPT = 30;
 const RUNS_RE = /```gstack-receipt-runs[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?:\r?\n|$)/;
 export type ReceiptRun = Pick<ShipReceipt, 'head' | 'version' | 'gstack_version' | 'run' | 'review_loop' | 'review_loop_exception'> & { depth?: string; carried_from?: string };
 export function receiptRuns(body: string): ReceiptRun[] {
-  const m = RUNS_RE.exec(body);
+  const m = RUNS_RE.exec(receiptSource(body));
   return m ? m[1]!.split('\n').flatMap(l => { try { const o = JSON.parse(l); return o && typeof o.head === 'string' ? [o as ReceiptRun] : []; } catch { return []; } }) : [];
 }
 export function receiptRun(r: ShipReceipt): ReceiptRun {
@@ -111,15 +127,32 @@ export function receiptRun(r: ShipReceipt): ReceiptRun {
   return JSON.parse(JSON.stringify({ head, version, gstack_version, run, review_loop, review_loop_exception, depth: r.review_depth?.depth, carried_from: r.carry?.from }));
 }
 
-/** The block becomes the first section of the body: an existing block is replaced in place at the top, prose follows; a replaced receipt joins the runs block. */
-export function placeReceiptFirst(body: string, receipt: ShipReceipt): string {
-  const prior = extractReceipt(body).receipt;
+/** Every receipt and runs block with the blank lines after it. */
+const STRIP_RE = /```gstack-(?:ship-receipt|receipt-runs)[ \t]*\r?\n[\s\S]*?\r?\n```[ \t]*(?:\r?\n|$)(?:[ \t]*\r?\n)*/g;
+
+/**
+ * The receipt and its runs block go at the end of the body's Agent notes section, which is created when the body has
+ * none; the section's other content stays above them. The section's old receipt and runs blocks and a legacy block
+ * that opens the body are removed, so one receipt remains; a fence quoted in the readable part stays, since it never
+ * binds. A replaced receipt joins the runs block.
+ * A legacy body (a receipt and no section, as /ship posted before the section existed) keeps its layout: the block is
+ * replaced in place at the top, because its Plan and issue lines sit in the readable part and a new section holding
+ * only the receipt would hide them from the readers that prefer the section (a carry on an open PR, GST-1825).
+ */
+export function placeReceipt(body: string, receipt: ShipReceipt): string {
+  const ex = extractReceipt(body);
+  const prior = ex.receipt;
   const runs = receiptRuns(body);
   if (prior && typeof prior.head === 'string' && JSON.stringify(prior) !== JSON.stringify(receipt)) runs.push(receiptRun(prior));
   const kept = runs.slice(-RECEIPT_RUNS_KEPT);
   const block = renderReceiptBlock(receipt) + (kept.length ? '\n```' + RUNS_FENCE + '\n' + kept.map(r => JSON.stringify(r)).join('\n') + '\n```\n' : '');
-  const stripped = body.replace(BLOCK_RE, '').replace(RUNS_RE, '').replace(/^\s+/, '');
-  return block + (stripped ? '\n' + stripped : '');
+  if (ex.found && splitAgentNotes(body).notes === null) {
+    const rest = body.replace(BLOCK_RE, '').replace(RUNS_RE, '').replace(/^\s+/, '');
+    return block + (rest ? '\n' + rest : '');
+  }
+  const rest = body.replace(LEGACY_TOP_RE, '');
+  const notes = (splitAgentNotes(rest).notes ?? '').replace(STRIP_RE, '').trim();
+  return withAgentNotes(rest.replace(/^\s+/, ''), (notes ? notes + '\n\n' : '') + block);
 }
 
 /** The receipt's `issues` object from a gstack-issue-links --out or --json file (its other keys are preview-only). */
@@ -173,6 +206,8 @@ export function readyTailLines(r: ShipReceipt | undefined): string[] {
   const legacy = !!r && !r.review_depth;
   return [
     loop ? `REVIEW_LOOP: passes=${loop.passes} blocking_found=${loop.blocking_found} deferred=${loop.deferred} noted=${loop.noted ?? 0} fixed=${loop.fixed ?? 0}${opt('unrecorded')}${opt('unbound')}${opt('fix_checks')}` : 'REVIEW_LOOP: none in the receipt',
+    ...(r?.ruled_notes ?? []).map(n => `RULED_NOTE: ${oneLine(ruledNoteText(n))}`),
+    ...laneExceptionBodyLines(r?.ci_carried).map(l => `TEST_LANE_EXCEPTION: ${oneLine(l.slice('Test-lane exception: '.length))}`),
     'TRIAL_MERGES: <one line per open sibling pin that shares a file: its git merge-tree result and the resolution, or "none share a file">',
     'Attention:',
     legacy ? 'reviewed by <model on another family> (risk class unknown: the receipt records no review_depth; rule 27 cross-family trail read)'
@@ -227,7 +262,7 @@ export interface CarryPlanInput {
   scopedReview?: string;
   /** Stamp files the branch changed as product whose only change since the reviewed head is a stamp on the branch's own rows, the base untouched, and without which the two product patches match (GST-980). */
   stampedRows?: string[];
-  /** A clean scoped re-check of the range-diff since the reviewed head (lib/ship-recheck.ts, J1): the carry reason it adds. */
+  /** A clean scoped re-check of the range-diff since the reviewed head (crew/lib/ship-recheck.ts, J1): the carry reason it adds. */
   recheck?: string;
 }
 export interface CarryRecord { from: string; reason: string; product_patch_id: string; changed_paths: string[]; merge_commits: number; range_diff: string; covers: string[]; reruns: string[]; trees?: string[]; ancestry?: 'linear' | 'rewritten' }

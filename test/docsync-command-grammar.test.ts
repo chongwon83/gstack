@@ -234,6 +234,30 @@ test('the installed docs-candidate helper is admitted only with a private .json 
   expect(docsNativeInterface(fixture)).toContain('compare <that .json> and --help commands');
 });
 
+test('the docs-candidate result command is admitted only with a private output file, a plain audit id and a private --out-dir', () => {
+  const helper = path.join(fixture.skills, 'bin/gstack-docs-candidate');
+  const output = path.join(fixture.home, 'audit-1-output.md');
+  const dir = path.join(fixture.home, 'docs-record');
+  for (const command of [
+    `${helper} result ${output} --audit-id audit-1 --out-dir ${fixture.home}`,
+    `${helper} result ${output} --out-dir ${dir} --audit-id audit-1`,
+    `${helper} result --help`,
+  ]) expect(docsCommandAllowed(command, fixture), command).toBe(true);
+  for (const command of [
+    `${helper} result ${output} --audit-id audit-1 --out-dir ${fixture.repo}`,
+    `${helper} result ${output} --audit-id audit-1 --out-dir ${path.join(fixture.repo, '.gstack')}`,
+    `${helper} result ${output} --audit-id audit-1 --out-dir ${path.join(fixture.skills, 'bin')}`,
+    `${helper} result ${output} --audit-id audit-1 --out-dir ${dir} --exec rm`,
+    `${helper} result ${output} --audit-id audit-1 --mode edit`,
+    `${helper} result ${output} --audit-id audit-1 --audit-id audit-2`,
+    `${helper} result ${output} --audit-id audit-1`,
+    `${helper} result ${output} --audit-id ../audit-1 --out-dir ${dir}`,
+    `${helper} result ${path.join(fixture.repo, 'out.md')} --audit-id audit-1 --out-dir ${dir}`,
+    `${helper} result --help extra`,
+  ]) expect(docsCommandAllowed(command, fixture), command).toBe(false);
+  expect(docsNativeInterface(fixture)).toContain(`${fixture.skills.split(path.sep).join('/')}/bin/gstack-docs-candidate result <a saved private .md or .json child output> --audit-id <the audit id> --out-dir <`);
+});
+
 // Train gate 39904966815 and GSTA-63's focused run joined the candidate's --help onto a line of reads; v1.91.185.0 moved the
 // own-call rule into the sentence naming --help and the slip came back four times (JOINED_READ_LINES below). The --help only
 // prints usage, so it now joins a line of reads like a Git read; every other own-call command stays alone.
@@ -704,5 +728,23 @@ test.skipIf(process.platform === 'win32')('the captured private-directory mkdir 
         `mkdir -p ${fixture.home}/x; rm -rf ${fixture.repo}`, `mkdir -p ${fixture.home}/x > ${fixture.repo}/out.md`, `mkdir -pv ${fixture.home}/x`])
         expect(docsCommandAllowed(line, fixture, [publish]), line).toBe(false);
     } finally { fs.rmSync(outside, { recursive: true, force: true }); }
+  } finally { fixture.clean(); }
+});
+
+// Value: protects=the interface says how the private directory it offers is made, the form the observer admits; fails_when=the
+//   sentence stops naming the own-call mkdir; why_new=ship-docsync-store went red twice (#3997 screen 41850017482 slice 2, census
+//   41987975678 slice 4) on one read line each that carried a no-op mkdir stand-in; seam=none; no_claim=that the model now never
+//   probes, which only paid runs measure
+test('the interface names its one mkdir form, and both captured mkdir stand-ins stay refused', () => {
+  const fixture = fixtureDocs('store');
+  try {
+    const publish = path.join(fixture.home, 'fixture-publish.ts');
+    const sentence = docsNativeInterface(fixture, [publish]).split(/(?<=\.)\s+/).find(part => part.startsWith('A private JSON/Markdown artifact'));
+    expect(sentence).toContain(`(with one mkdir ${fixture.home}/<name>, optionally -p, as its own Bash call: the only mkdir this interface admits`);
+    expect(docsCommandAllowed(`mkdir ${fixture.home}/docs-store`, fixture, [publish])).toBe(true);
+    for (const line of [
+      `git rev-parse HEAD; git merge-base main HEAD; git rev-parse origin/main; mkdir -p /dev/null 2>/dev/null; ls ${fixture.home}/state`,
+      `git tag --list; git log --oneline --all; mkdir_check=1; ls ${fixture.home}`,
+    ]) expect(docsCommandAllowed(line, fixture, [publish]), line).toBe(false);
   } finally { fixture.clean(); }
 });

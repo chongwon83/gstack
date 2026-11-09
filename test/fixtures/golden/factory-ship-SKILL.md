@@ -397,7 +397,7 @@ and outside_status; retain partial coverage. These details do not clear Eng Revi
 
 **3. Choose the historical verdict.** CLEARED requires the selected Eng Review
 to be `clean`, within 7 days and fresh under step 2. Otherwise report NOT CLEARED
-and its missing, stale or open-issue reason. With no Eng Review record, say "no saved Eng Review: run the `PERSIST:` line a read-only /plan-eng-review printed, or rerun it" (docs/troubleshooting.md#plan-eng-review-not-persisted). If `skip_eng_review` is true, show
+and its missing, stale or open-issue reason. With no Eng Review record, say "no saved Eng Review: run the `PERSIST:` line a read-only eng review printed, or rerun /autoplan" (docs/troubleshooting.md#plan-eng-review-not-persisted). If `skip_eng_review` is true, show
 "SKIPPED (global)" for Eng Review and CLEARED for this dashboard.
 This verdict never skips Step 9 or its finding, approval and convergence gates. Continue Step 1 even when history is NOT CLEARED.
 
@@ -425,8 +425,8 @@ VERDICT: {CLEARED or NOT CLEARED} — {reason}
 
 An outside review with status `unverified` or `unavailable` is missing coverage, never a pass.
 
-Over 200 lines, `DIFF:` recommends `/plan-eng-review` or `/autoplan`. `SCOPE: frontend=true` (from
-`gstack-diff-scope <base>`) with no design review: mention "Design Review not run — Step 9 includes the lite check; consider /design-review for a full visual audit."
+Over 200 lines, `DIFF:` recommends `/autoplan`. `SCOPE: frontend=true` (from
+`gstack-diff-scope <base>`) (Lit or htm templates in .ts/.js count) with no design review: mention "Design Review: static (no preview declared) — Step 9 runs the lite check only; consider /design-review on a served page for a visual audit."
 
 Continue to Step 2 without asking; Step 9 applies the review gates.
 
@@ -649,8 +649,8 @@ Make bisectable commits; if already committed, continue to Step 16. Never create
    migrations may stand alone. Under 50 lines across fewer than 4 files may be one commit.
 2. Order dependencies first: infrastructure → models/services → controllers/views.
    Each commit works alone (no broken imports or missing code).
-3. Use `<type>: <summary>` (feat/fix/chore/refactor/docs) and a brief body; fixing a
-   user-named issue adds a `Fixes: #<n>` trailer. Leave VERSION, CHANGELOG/fragment, TODOS.md
+3. Subject: the change for a user in plain words, issue code last; brief body;
+   trailers last (a user-named issue: `Fixes: #<n>`). Leave VERSION, CHANGELOG/fragment, TODOS.md
    and the digest uncommitted: Step 16's `finish` commits them last with
    `--trailer 'Co-Authored-By: Factory Droid <droid@users.noreply.github.com>'`. Do not add a Git tag.
 
@@ -664,27 +664,25 @@ Make bisectable commits; if already committed, continue to Step 16. Never create
 it. Content changes during or after verification restart at
 stage 1 and complete all five stages before Step 17. Content-preserving commits keep evidence valid.
 
-**One call for stages 1–4:** `$GSTACK_ROOT/bin/gstack-ship-release finish --base <base> --reviewed-tree <tree> --reviewed-base <mb> --docs-post <audit-id>-post.json --lane <label>=<Step 5 command>... [--build <cmd>]... --trailer '<trailer>'`
+**One call for stages 1–4:** `$GSTACK_ROOT/bin/gstack-ship-release finish --base <base> --reviewed-tree <tree> --reviewed-base <mb> --docs-post <audit-id>-post.json --lane <label>=<Step 5 command>... [--build <cmd>]... --trailer '<trailer>' [--plan "<Plan line>"]`
 also makes Step 15's item-3 commit and runs the pregate (`--docs-rechecked`,
 `--no-lanes-approved` record stage 2.2 and Step 5's approval).
 
 ### 1. Finish writers and prepare outputs
 
-Before `finish`, inspect writer handles, including the docs child. Confirm completion or
-termination before another writer runs; timeout or cancellation acknowledgment
-alone means STOP until confirmed.
+Before `finish`, confirm every writer (the docs child too) completed or terminated;
+an acknowledged timeout or cancellation alone means STOP until confirmed.
 
-Find declared generation/build commands in project instructions, manifests, build
-files and CI. Pass each to `finish` as `--build`. If none exists, record not applicable and
-the inspected sources. A missing prerequisite or failed build stops shipping:
-report **Build failed or prerequisite missing**, with the command, error and needed
-repair. Never invent a substitute command.
+Pass each declared generation/build command (instructions, manifests, build files, CI)
+as `--build`; with none, record N/A and the sources inspected.
+A missing prerequisite or failed build stops shipping: report **Build failed or prerequisite
+missing** with the command, error and repair. Never invent a substitute command.
 **If blocked:** repair it, repeat stage 1, then continue to stage 2: a content repair is behavior there.
 
 ### 2. Choose the change route
 
-`finish` runs `git diff <reviewed-tree> <current-tree>` (`--reviewed-tree`, saved before Step 12,
-against `$GSTACK_ROOT/bin/gstack-wtree`) and prints `ROUTE:`. No saved tree: pass `review_binding.end_wtree` from Step 11.5's bound Step 9 record;
+`finish` runs `git diff <reviewed-tree> <current-tree>` (`--reviewed-tree`, saved before Step 12
+by `$GSTACK_ROOT/bin/gstack-wtree`) and prints `ROUTE:`. No saved tree: pass `review_binding.end_wtree` from Step 11.5's bound Step 9 record;
 with none, insert `9 → 10 → 11 → 11.5`.
 
 Its `STOP:` names the route:
@@ -692,11 +690,12 @@ Its `STOP:` names the route:
 1. **Behavior, tests or build inputs changed:** Prompts/templates count as behavior.
    Insert `5–11.5 → 12–14 → 16` before the pending Step 17. It excludes Step 14.5 (a rebuild
    can change generated docs; compare before stage 3) and Step 15 (`finish` STOPs on an uncommitted
-   non-release file: commit it by Step 15's rules, then rerun). A STOP naming a scoped-review packet
+   non-release file: commit it per Step 15, rerun). Its Step 9 plans with `gstack-review-plan --post-review`
+   (at the cap: a stop for the owner). A STOP naming a scoped-review packet
    instead takes one reader (no round) and `--context-reviewed` rerun; a blocker is this item.
 2. **Only authored docs or release metadata changed:** Keep Step 8's original child
-   report and counts. Recheck affected plan items using their recorded verification
-   and append current evidence to the invocation record. If a classification is no
+   report and counts. Recheck affected plan items by their recorded verification and
+   log current evidence. If a classification is no
    longer supported, run Step 8's audit and decision gates only, then return to
    Step 16 stage 1; else rerun with `--docs-rechecked`. Never edit the child's counts yourself.
 3. **No changes, or the docs-only checks still support the plan:** `finish` continues to
